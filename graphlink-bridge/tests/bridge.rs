@@ -397,3 +397,22 @@ fn a_connecting_bridge_checks_the_remotes_certificate() {
     let mut plain = Seat::start(&remote);
     assert!(!plain.until(2000, opened), "the bridge opened a plain link to a TLS remote");
 }
+
+// ---- the seat's own nodes have no namespace prefix: a bare id is the seat's ---------------------------------------------------------------------
+
+#[test]
+fn a_bare_id_is_the_seats_own_node_for_a_remotes_subscription() {
+    let (mut seat, addr) = Seat::start_listening();
+    let (_w, _lines) = watch(&addr, &["Lamp:desk"]);
+    assert!(seat.until(10000, |s| s.ops().iter().any(|o| matches!(o, Op::Sub { target: Target::Id(i), .. } if i == "Lamp:desk"))), "a subscription to a bare id never reached the seat: {}", seat.stderr());
+}
+
+#[test]
+fn a_bare_id_is_the_seats_own_node_for_a_remotes_write() {
+    let (mut seat, addr) = Seat::start_listening();
+    let out = Command::new(cli_bin()).args(["write", &addr, "Lamp:desk", "power", "\"on\""]).stdout(Stdio::piped()).spawn().unwrap();
+    assert!(seat.until(10000, |s| s.ops().iter().any(|o| matches!(o, Op::Wr { id, .. } if id == "Lamp:desk"))), "a write to a bare id never reached the seat: {}", seat.stderr());
+    let wid = seat.ops().iter().find_map(|o| if let Op::Wr { wid, .. } = o { Some(wid.clone()) } else { None }).unwrap();
+    seat.send(vec![Op::Res { wid, refused: None }]);
+    assert_eq!(String::from_utf8_lossy(&out.wait_with_output().unwrap().stdout).trim(), "ok");
+}
