@@ -1,6 +1,6 @@
 # Shared memory: a table of cells holding CBOR values (DESIGN, not built)
 
-Status: **design. Nothing here is built.** Decided by the operator: values in shared memory are CBOR items, in a table with one slot per cell (answer of the design talk, 2026-11-17). Every size, limit and number below is a DECISION for the operator and is marked as one; none is set.
+Status: **design. Nothing here is built.** Decided by the operator: values in shared memory are CBOR items, in a table with one slot per cell. Every size, limit and number below is a DECISION for the operator and is marked as one; none is set.
 
 ## 1. Why this and not frames
 
