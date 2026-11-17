@@ -1,5 +1,6 @@
 //! The graph link's core (moved out of cliffvm, #1143): which foreign `(eid, prop)` the VM reads (SUBSCRIPTIONS BY DEPENDENCY), the notices
 //! the host takes at the end of a round (`subs`, `unsubs`, `due`), and the replica notes (`Replica`). The engine never talks to a network.
+pub mod cbor;
 pub mod frame;
 pub mod link;
 pub mod order;
