@@ -3,7 +3,7 @@ use graphlink_core::frame::{Frame, Op, Target};
 use graphlink_core::link::{Event, Link, Me};
 use graphlink_core::transport::{pipe, Transport};
 
-fn me(ns: &str, support: &[u32]) -> Me { Me { ns: ns.into(), build: "t".into(), epoch: 1.0, support: support.to_vec() } }
+fn me(ns: &str, support: &[u32]) -> Me { Me { ns: ns.into(), build: "t".into(), epoch: 1.0, support: support.to_vec(), initiator: false } }
 
 /// move everything a link has to say through the transport, and what arrives back into the link; returns the events it produced
 fn pump<T: Transport>(link: &mut Link, t: &mut T) -> Vec<Event> {
