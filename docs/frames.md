@@ -1,4 +1,4 @@
-# Frames and version negotiation (spec for graphlink-core; the first slice)
+# Frames and version negotiation (spec for graphlink-core)
 
 The unit of ordering is the **frame**, a JSON object (the CBOR encoding for devices is a later slice; it carries the same map):
 
@@ -24,8 +24,10 @@ The unit of ordering is the **frame**, a JSON object (the CBOR encoding for devi
 | `wr` | `wid`, `id`, `prop`, `value` | forwarded write request |
 | `res` | `wid`, then `ok` or `refused` | the answer to a `wr` |
 | `bye` | `why` | close |
-
-`q` / `page`, `resync` and `pause` are the next slice.
+| `q` | `qid`, `prefix` or `class` (exactly one), `after?`, `limit?` | a paged query: the entities under a prefix or of a class, after the id `after` |
+| `page` | `qid`, `rows`, `next?`, `total?` | the answer to a `q`; `rows` are JSON objects the owner chooses, `next` the `after` for the following page (absent on the last), `total` the count when the owner knows it |
+| `resync` | `have` | after a reconnect: the revision held per subscribed id; the owner sends only the nodes whose revision differs (a changed `epoch` in the owner's `hello` means resend all) |
+| `pause` | `have` | the peer is hidden: the owner stops sending `val` and keeps only revisions; a `resync` wakes it. Read from babyseat `docs/graph-link.md` ("a hidden page sends `pause` (a `hello` with `have`)"): the op carries the same `have` as `resync` |
 
 ## Rules
 
