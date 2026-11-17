@@ -25,8 +25,10 @@ Nothing here is published to crates.io; use it as a git dependency.
 | `LINK_GRACE_S` | how long an unread subscription lives (0.5 s of engine time) |
 | `Replica`, `ReplicaState` | a foreign entity's local copy: the revision applied, the props a value arrived for, and the owner's verdict (`Live`, `Gone`, `Refused`) |
 | `is_special` | the attributes the VM provides itself, never replicated |
+| `frame::Frame`, `frame::Op` | the frame and its ops (`hello`, `failed`, `sub`, `unsub`, `val`, `read`, `wr`, `res`, `bye`, and `Unknown` for an op this version does not know) with `decode` and `encode` to and from JSON; the spec is `docs/frames.md` |
+| `frame::negotiate` | the highest protocol version two peers share, or the `failed` op to answer with |
 
-Not built yet (design only): the frame types and encodings (JSON, CBOR), version negotiation in `hello`, forwarded writes and receipts, the store and transport traits, shared memory, the C interface and the language bindings.
+Not built yet (design only): the CBOR encoding, frame ordering and duplicate rules (`n`, `ack`), `q`/`page`, `resync` and `pause`, the store and transport traits, shared memory, the C interface and the language bindings. `docs/frames.md` lists the decisions that are still the operator's.
 
 ## Using it
 
