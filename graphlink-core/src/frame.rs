@@ -113,7 +113,7 @@ impl Op {
 
     fn encode(&self) -> J {
         let mut m = Map::new();
-        let mut op = |name: &str, m: &mut Map<String, J>| { let mut o = Map::new(); o.insert("op".into(), json!(name)); o.extend(std::mem::take(m)); J::Object(o) };
+        let op = |name: &str, m: &mut Map<String, J>| { let mut o = Map::new(); o.insert("op".into(), json!(name)); o.extend(std::mem::take(m)); J::Object(o) };
         match self {
             Op::Hello { ns, build, epoch, have, support } => {
                 m.insert("ns".into(), json!(ns)); m.insert("build".into(), json!(build)); m.insert("epoch".into(), json!(epoch));
