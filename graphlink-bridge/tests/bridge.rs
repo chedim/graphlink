@@ -59,9 +59,25 @@ impl Seat {
         let mut link = Link::new(Me { ns: "membrane".into(), build: "t".into(), epoch: 1.0, support: vec![VERSION], initiator: true });
         ctl.send(&link.open()).unwrap();
         let bridge = Command::new(BRIDGE)
-            .args(["connect", &remote.addr, "--peer", &name, "--slots", "64", "--key-cap", "128", "--val-cap", "1024", "--epoch", "1"])
+            .args(["connect", &remote.addr, "--peer", &name, "--slots", "64", "--key-cap", "128", "--val-cap", "1024", "--epoch", "1", "--spins", &SPINS.to_string(), "--depth", &DEPTH.to_string()])
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
         Seat { _names: names, name, ctl, _sc: sc, link, events: vec![], bridge: Some(Kill(bridge)), pc: None }
+    }
+    /// the bridge listens (loopback, an ephemeral port); returns the seat and the address it prints
+    fn start_listening() -> (Seat, String) {
+        let name = peer_name();
+        let names = Names(name.clone());
+        let mut ctl = Shm::create(format!("/gl-{name}-ctl"), 4096).unwrap();
+        let sc = Cells::create(format!("/gl-{name}-sc"), 16, 64, 256, 1).unwrap();
+        let mut link = Link::new(Me { ns: "membrane".into(), build: "t".into(), epoch: 1.0, support: vec![VERSION], initiator: true });
+        ctl.send(&link.open()).unwrap();
+        let mut bridge = Command::new(BRIDGE)
+            .args(["listen", "127.0.0.1:0", "--peer", &name, "--slots", "64", "--key-cap", "128", "--val-cap", "1024", "--epoch", "1", "--spins", &SPINS.to_string(), "--depth", &DEPTH.to_string()])
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let mut line = String::new();
+        BufReader::new(bridge.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+        let addr = line.trim().strip_prefix("listening ").unwrap_or_else(|| panic!("the first line was {line:?}")).to_string();
+        (Seat { _names: names, name, ctl, _sc: sc, link, events: vec![], bridge: Some(Kill(bridge)), pc: None }, addr)
     }
     fn send(&mut self, ops: Vec<Op>) { let f = self.link.send(ops).expect("link open"); self.ctl.send(&f).unwrap(); }
     fn until(&mut self, ms: u64, done: impl Fn(&mut Seat) -> bool) -> bool {
@@ -183,4 +199,81 @@ fn a_missing_option_is_named_and_exits_2() {
     let o = Command::new(BRIDGE).args(["connect", "127.0.0.1:1", "--peer", "x"]).stdin(Stdio::null()).output().unwrap();
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("--slots"), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+// ---- a remote reaching the seat: the bridge listens (or the remote subscribes through a connection the bridge made) ----------------------------------
+
+fn watch(addr: &str, args: &[&str]) -> (Kill, std::sync::mpsc::Receiver<String>) {
+    let mut child = Command::new(cli_bin()).arg("watch").arg(addr).args(args).stdout(Stdio::piped()).spawn().unwrap();
+    let out = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || for l in BufReader::new(out).lines().map_while(Result::ok) { if tx.send(l).is_err() { break; } });
+    (Kill(child), rx)
+}
+fn line_with(rx: &std::sync::mpsc::Receiver<String>, ms: u64, want: impl Fn(&J) -> bool) -> Option<J> {
+    let end = Instant::now() + Duration::from_millis(ms);
+    while Instant::now() < end {
+        if let Ok(l) = rx.recv_timeout(Duration::from_millis(20)) { if let Ok(j) = serde_json::from_str::<J>(&l) { if want(&j) { return Some(j); } } }
+    }
+    None
+}
+
+#[test]
+fn a_remote_that_connects_to_a_listening_bridge_subscribes_to_a_seat_node_and_gets_its_cells() {
+    let (mut seat, addr) = Seat::start_listening();
+    let (_w, lines) = watch(&addr, &["membrane::Lamp:1"]);
+    // the bridge passes the subscription to the seat, which answers it by writing cells
+    assert!(seat.until(10000, |s| s.ops().iter().any(|o| matches!(o, Op::Sub { target: Target::Id(i), .. } if i == "membrane::Lamp:1"))), "the seat never saw the subscription: {}", seat.stderr());
+    let sc = &mut seat._sc;
+    sc.put("membrane::Lamp:1\u{1}", 1.0, &json!(true)).unwrap();
+    sc.put("membrane::Lamp:1\u{1}power", 1.0, &json!("off")).unwrap();
+    let first = line_with(&lines, 10000, |j| j["props"]["power"] == json!("off")).expect("the remote never got the value");
+    assert_eq!(first["id"], json!("membrane::Lamp:1"));
+    // a change of a cell reaches the remote as a new value
+    seat._sc.put("membrane::Lamp:1\u{1}power", 2.0, &json!("on")).unwrap();
+    assert!(line_with(&lines, 10000, |j| j["props"]["power"] == json!("on")).is_some(), "the changed value never reached the remote");
+}
+
+#[test]
+fn a_gone_cell_reaches_the_remote_as_gone() {
+    let (mut seat, addr) = Seat::start_listening();
+    let (_w, lines) = watch(&addr, &["membrane::Lamp:2"]);
+    assert!(seat.until(10000, |s| s.ops().iter().any(|o| matches!(o, Op::Sub { .. }))));
+    seat._sc.mark("membrane::Lamp:2\u{1}", 1.0, CellState::Gone, "").unwrap();
+    assert!(line_with(&lines, 10000, |j| j["gone"] == json!(true)).is_some(), "the remote was never told the node is gone");
+}
+
+#[test]
+fn a_subscription_to_a_node_outside_the_seats_namespace_is_not_passed_on() {
+    let (mut seat, addr) = Seat::start_listening();
+    let (_w, _lines) = watch(&addr, &["hall::Door:front"]);
+    seat.until(1000, |_| false);
+    assert!(!seat.ops().iter().any(|o| matches!(o, Op::Sub { .. })), "the bridge passed a foreign subscription to the seat: {:?}", seat.ops());
+}
+
+#[test]
+fn a_remote_write_goes_to_the_seat_and_the_seats_receipt_goes_back() {
+    let (mut seat, addr) = Seat::start_listening();
+    let out = Command::new(cli_bin()).args(["write", &addr, "membrane::Lamp:1", "power", "\"on\""]).stdout(Stdio::piped()).spawn().unwrap();
+    assert!(seat.until(10000, |s| s.ops().iter().any(|o| matches!(o, Op::Wr { .. }))), "{}", seat.stderr());
+    let wid = seat.ops().iter().find_map(|o| if let Op::Wr { wid, .. } = o { Some(wid.clone()) } else { None }).unwrap();
+    seat.send(vec![Op::Res { wid, refused: None }]);
+    let o = out.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "ok");
+}
+
+#[test]
+fn a_remote_write_to_a_node_outside_the_seats_namespace_is_refused_by_the_bridge() {
+    let (mut seat, addr) = Seat::start_listening();
+    let o = Command::new(cli_bin()).args(["write", &addr, "hall::Door:front", "locked", "false"]).stdout(Stdio::piped()).output().unwrap();
+    assert!(String::from_utf8_lossy(&o.stdout).starts_with("refused:"), "{}", String::from_utf8_lossy(&o.stdout));
+    assert!(!seat.ops().iter().any(|o| matches!(o, Op::Wr { .. })));
+    seat.until(100, |_| false);
+}
+
+#[test]
+fn a_listen_address_that_is_not_loopback_is_refused_unless_it_is_asked_for() {
+    let o = Command::new(BRIDGE).args(["listen", "0.0.0.0:0", "--peer", "x", "--slots", "64", "--key-cap", "128", "--val-cap", "1024", "--epoch", "1", "--spins", "1", "--depth", "1"]).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--allow-remote"), "{}", String::from_utf8_lossy(&o.stderr));
 }

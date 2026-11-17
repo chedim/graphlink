@@ -1,40 +1,46 @@
 //! graphlink-bridge: TCP outward, shared memory inward. It joins a seat to a remote peer so that the seat needs no socket: to the seat the bridge is an ordinary local peer (the control rings and
 //! cell table a seat makes for a declared peer), and what the bridge says about itself is the remote's own namespace.
 //!
-//!   graphlink-bridge connect <addr> --peer <name> --slots <n> --key-cap <n> --val-cap <n> --epoch <n>
+//!   graphlink-bridge connect <addr> --peer <name> --slots <n> --key-cap <n> --val-cap <n> --epoch <n> --spins <n> --depth <n>
+//!   graphlink-bridge listen  <addr> --peer <name> ... the same ... [--allow-remote]   wait for the remote to connect (a loopback address unless --allow-remote)
 //!
 //! The seat makes `/gl-<name>-ctl` (control rings) and `/gl-<name>-sc` (its own cell table) first; the bridge attaches the rings, connects to `<addr>`, learns the remote's namespace from its
 //! `hello`, makes `/gl-<name>-pc` (the bridge's cell table: the remote's values, as the seat reads them) and answers the seat's `hello` with that namespace. Toward the remote the bridge says the
 //! seat's namespace. What the seat asks (`sub`, `unsub`, `read`, `query`, `wr`) goes to the remote; what the remote answers goes back: values become cells, receipts and pages go over the rings.
-//! A node outside the remote's namespace is dropped both ways. The cell table's slot count, key and value capacities and epoch are the owner's numbers: no defaults.
+//! A node outside the remote's namespace is dropped both ways. The other way round, a remote's `sub` of a node of the seat's namespace goes to the seat over the rings, the seat answers it by writing
+//! its own cell table, and the bridge reads those cells and sends the remote a `val` for each new one (`gone` for a node that is gone); a remote's `wr` goes to the seat and the seat's receipt back.
+//! The cell table's slot count, key and value capacities, epoch, and the reader's spin and depth limits are the owner's numbers: no defaults. After `listen` says `listening <addr>` the first remote
+//! to connect is the one the bridge serves.
 //! When either end goes, the bridge says `bye` to the other and ends.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::exit;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use graphlink_core::frame::{Frame, Op, ValBody, VERSION};
+use graphlink_core::frame::{Frame, Op, Target, ValBody, VERSION};
 use graphlink_core::link::{Event, Link, Me};
 use graphlink_core::transport::Transport;
-use graphlink_net::Tcp;
-use graphlink_shm::cells::{Cells, CellState};
+use graphlink_net::{Listener, Tcp};
+use graphlink_shm::cells::{Cells, CellsReader, CellState};
 use graphlink_shm::Shm;
 use serde_json::{json, Value as J};
 
-const OPTIONS: [&str; 5] = ["--peer", "--slots", "--key-cap", "--val-cap", "--epoch"];
+const OPTIONS: [&str; 7] = ["--peer", "--slots", "--key-cap", "--val-cap", "--epoch", "--spins", "--depth"];
 
 fn usage(msg: &str) -> ! {
-    eprintln!("{msg}\nusage:\n  graphlink-bridge connect <addr> --peer <name> --slots <n> --key-cap <n> --val-cap <n> --epoch <n>");
+    eprintln!("{msg}\nusage:\n  graphlink-bridge connect|listen <addr> --peer <name> --slots <n> --key-cap <n> --val-cap <n> --epoch <n> --spins <n> --depth <n> [--allow-remote (listen)]");
     exit(2)
 }
 
-struct Config { addr: String, peer: String, slots: u64, key_cap: u32, val_cap: u32, epoch: u64 }
+struct Config { listen: bool, addr: String, peer: String, slots: u64, key_cap: u32, val_cap: u32, epoch: u64, spins: u64, depth: usize }
 
 fn parse(args: &[String]) -> Config {
-    if args.first().map(String::as_str) != Some("connect") { usage("the command is `connect`"); }
-    let addr = args.get(1).filter(|a| !a.starts_with("--")).unwrap_or_else(|| usage("connect needs an address")).clone();
+    let listen = match args.first().map(String::as_str) { Some("connect") => false, Some("listen") => true, _ => usage("the command is `connect` or `listen`") };
+    let addr = args.get(1).filter(|a| !a.starts_with("--")).unwrap_or_else(|| usage("connect and listen need an address")).clone();
+    let mut allow_remote = false;
     let mut given: BTreeMap<&str, String> = BTreeMap::new();
     let mut i = 2;
     while i < args.len() {
+        if listen && args[i] == "--allow-remote" { allow_remote = true; i += 1; continue; }
         let Some(opt) = OPTIONS.iter().find(|o| **o == args[i]) else { usage(&format!("unknown option {}", args[i])) };
         given.insert(opt, args.get(i + 1).unwrap_or_else(|| usage(&format!("{opt} needs a value"))).clone());
         i += 2;
@@ -42,7 +48,12 @@ fn parse(args: &[String]) -> Config {
     let missing: Vec<&str> = OPTIONS.iter().copied().filter(|o| !given.contains_key(o)).collect();
     if !missing.is_empty() { usage(&format!("missing: {} (the numbers are the owner's: there are no defaults)", missing.join(", "))); }
     fn num<T: std::str::FromStr>(g: &BTreeMap<&str, String>, o: &str) -> T { g[o].parse().unwrap_or_else(|_| usage(&format!("{o} is not a number: {}", g[o]))) }
-    Config { addr, peer: given["--peer"].clone(), slots: num(&given, "--slots"), key_cap: num(&given, "--key-cap"), val_cap: num(&given, "--val-cap"), epoch: num(&given, "--epoch") }
+    if listen && !allow_remote {
+        use std::net::ToSocketAddrs;
+        let loopback = addr.to_socket_addrs().map(|mut a| a.all(|x| x.ip().is_loopback())).unwrap_or(false);
+        if !loopback { usage(&format!("{addr} is not a loopback address: a bridge listens on one only with --allow-remote")); }
+    }
+    Config { listen, addr, peer: given["--peer"].clone(), slots: num(&given, "--slots"), key_cap: num(&given, "--key-cap"), val_cap: num(&given, "--val-cap"), epoch: num(&given, "--epoch"), spins: num(&given, "--spins"), depth: num(&given, "--depth") }
 }
 
 fn fail(msg: &str) -> ! { eprintln!("graphlink-bridge: {msg}"); exit(1) }
@@ -89,11 +100,23 @@ impl Published {
 }
 
 /// what the remote said: a value of a node of its namespace becomes cells; a receipt and a page (its rows of its namespace only) go to the seat; the end of the link ends the bridge
-fn from_remote(events: Vec<Event>, remote_ns: &str, table: &mut Published, to_seat: &mut Vec<Op>) -> bool {
+fn from_remote(events: Vec<Event>, remote_ns: &str, seat_ns: &str, table: &mut Published, subs: &mut Subs, to_seat: &mut Vec<Op>, to_remote: &mut Vec<Op>) -> bool {
     let mine = |id: &str| id.split_once("::").map_or(false, |(n, _)| n == remote_ns);
+    let seats = |id: &str| id.split_once("::").map_or(false, |(n, _)| n == seat_ns);
     let mut end = false;
     for ev in events {
         match ev {
+            // the remote reads the seat: only nodes of the seat's namespace go to the seat
+            Event::Op(Op::Sub { target, props, limit }) => {
+                if matches!(&target, Target::Id(i) if !seats(i)) { continue; }
+                subs.add(target.clone(), props.clone());
+                to_seat.push(Op::Sub { target, props, limit });
+            }
+            Event::Op(Op::Unsub { target }) => { subs.remove(&target); to_seat.push(Op::Unsub { target }); }
+            Event::Op(Op::Wr { wid, id, prop, value }) => {
+                if seats(&id) { to_seat.push(Op::Wr { wid, id, prop, value }); }
+                else { to_remote.push(Op::Res { wid, refused: Some(format!("not a node of {seat_ns}: {id}")) }); }
+            }
             Event::Op(Op::Val { id, r, body, .. }) => { if mine(&id) { table.val(&id, r, body); } }
             Event::Op(Op::Res { wid, refused }) => to_seat.push(Op::Res { wid, refused }),
             Event::Op(Op::Page { qid, rows, next, total }) => {
@@ -107,20 +130,85 @@ fn from_remote(events: Vec<Event>, remote_ns: &str, table: &mut Published, to_se
     end
 }
 
+/// what the remote subscribed to, and which cell revisions of the seat's table it has been sent
+#[derive(Default)]
+struct Subs { list: Vec<(Target, Option<Vec<String>>)>, sent: BTreeMap<String, f64>, down: BTreeSet<String> }
+
+fn covers(t: &Target, id: &str) -> bool { match t { Target::Id(i) => i == id, Target::Prefix(p) => id.starts_with(p.as_str()) } }
+
+impl Subs {
+    fn add(&mut self, target: Target, props: Option<Vec<String>>) {
+        self.forget(&target);   // a subscription again sends the values again
+        self.list.retain(|(t, _)| *t != target);
+        self.list.push((target, props));
+    }
+    fn remove(&mut self, target: &Target) { self.list.retain(|(t, _)| t != target); self.forget(target); }
+    fn forget(&mut self, target: &Target) {
+        self.sent.retain(|k, _| !covers(target, k.split('\u{1}').next().unwrap_or("")));
+        self.down.retain(|id| !covers(target, id));
+    }
+
+    /// the seat's cells for what the remote subscribed to: a `val` for each node with a cell newer than the last one sent, `gone` (or `refused`) once for a node that is not live
+    fn relay(&mut self, reader: &CellsReader, spins: u64, depth: usize, out: &mut Vec<Op>) {
+        let mut ids: BTreeSet<String> = BTreeSet::new();
+        for (t, _) in &self.list {
+            match t {
+                Target::Id(i) => { ids.insert(i.clone()); }
+                Target::Prefix(p) => { if let Ok(rows) = reader.scan(p, spins, depth) { ids.extend(rows.into_iter().filter_map(|(k, _)| k.split_once('\u{1}').map(|(id, _)| id.to_string()))); } }
+            }
+        }
+        for id in ids {
+            match reader.get(&format!("{id}\u{1}"), spins, depth) {
+                Ok(Some(c)) if c.state != CellState::Live => {
+                    if self.down.insert(id.clone()) {
+                        let body = if c.state == CellState::Gone { ValBody::Gone } else { ValBody::Refused(c.value.as_str().unwrap_or("refused").to_string()) };
+                        out.push(Op::Val { id, r: c.rev, rid: None, body });
+                    }
+                    continue;
+                }
+                Ok(Some(_)) => { if self.down.remove(&id) { self.sent.retain(|k, _| !k.starts_with(&format!("{id}\u{1}"))); } }
+                Ok(None) => continue,
+                Err(e) => { eprintln!("graphlink-bridge: cell of {id}: {e}"); continue; }
+            }
+            let named: Vec<&Option<Vec<String>>> = self.list.iter().filter(|(t, _)| covers(t, &id)).map(|(_, p)| p).collect();
+            let all = named.iter().any(|p| p.is_none());
+            let wanted: Vec<&String> = named.iter().filter_map(|p| p.as_ref()).flatten().collect();
+            let rows = match reader.scan(&format!("{id}\u{1}"), spins, depth) { Ok(r) => r, Err(e) => { eprintln!("graphlink-bridge: cells of {id}: {e}"); continue } };
+            let (mut props, mut rev) = (serde_json::Map::new(), 0f64);
+            for (key, c) in rows {
+                let Some((_, prop)) = key.split_once('\u{1}').map(|(i, p)| (i.to_string(), p.to_string())) else { continue };
+                if prop.is_empty() || c.state != CellState::Live || !(all || wanted.iter().any(|w| w.as_str() == prop)) { continue; }
+                if self.sent.get(&key).map_or(true, |r| c.rev > *r) { self.sent.insert(key, c.rev); rev = rev.max(c.rev); props.insert(prop.to_string(), c.value); }
+            }
+            if !props.is_empty() { out.push(Op::Val { id, r: rev, rid: None, body: ValBody::Props(J::Object(props)) }); }
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cfg = parse(&args);
 
     // the seat's end first: its rings, and the hello it has already sent
     let mut ctl = Shm::attach(format!("/gl-{}-ctl", cfg.peer)).unwrap_or_else(|e| fail(&format!("cannot attach the seat's control rings: {e}")));
-    let mut tcp = Tcp::connect(cfg.addr.as_str()).unwrap_or_else(|e| fail(&format!("cannot connect to {}: {e}", cfg.addr)));
+    let mut tcp = if cfg.listen {
+        let listener = Listener::bind(cfg.addr.as_str()).unwrap_or_else(|e| fail(&format!("cannot listen on {}: {e}", cfg.addr)));
+        println!("listening {}", listener.local_addr().unwrap());
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        loop {
+            match listener.accept() { Ok(Some(t)) => break t, Ok(None) => { if ctl.is_closed() { exit(0); } nap(); } Err(e) => fail(&format!("accept: {e}")) }
+        }
+    } else {
+        Tcp::connect(cfg.addr.as_str()).unwrap_or_else(|e| fail(&format!("cannot connect to {}: {e}", cfg.addr)))
+    };
     let seat_hello: Frame = loop {
         match ctl.recv() { Ok(Some(f)) => break f, Ok(None) => { if ctl.is_closed() { exit(0); } nap(); } Err(e) => fail(&format!("the seat's rings: {e}")) }
     };
     let seat_ns = seat_hello.ops.iter().find_map(|o| if let Op::Hello { ns, .. } = o { Some(ns.clone()) } else { None }).unwrap_or_else(|| fail("the seat's first frame is not a hello"));
 
     // toward the remote: say the seat's namespace, learn the remote's
-    let mut remote = Link::new(me(&seat_ns, true));
+    let mut remote = Link::new(me(&seat_ns, !cfg.listen));
     let _ = tcp.send(&remote.open());
     let mut early: Vec<Event> = vec![];
     let remote_ns = loop {
@@ -141,6 +229,8 @@ fn main() {
     // toward the seat: the remote's table, then the answer to the seat's hello in the remote's name
     let cells = Cells::create(format!("/gl-{}-pc", cfg.peer), cfg.slots, cfg.key_cap, cfg.val_cap, cfg.epoch).unwrap_or_else(|e| fail(&format!("cannot make the cell table: {e}")));
     let mut table = Published { cells, last: BTreeMap::new() };
+    let reader = CellsReader::attach(format!("/gl-{}-sc", cfg.peer)).unwrap_or_else(|e| fail(&format!("cannot attach the seat's cell table: {e}")));
+    let mut subs = Subs::default();
     let mut seat = Link::new(me(&remote_ns, false));
     let _ = ctl.send(&seat.open());
     let (events, reply) = seat.receive(seat_hello);
@@ -148,7 +238,7 @@ fn main() {
     let mut to_remote: Vec<Op> = vec![];
     let mut to_seat: Vec<Op> = vec![];
     let mut done = events.iter().any(|e| matches!(e, Event::Failed { .. } | Event::Closed { .. }));
-    if from_remote(early, &remote_ns, &mut table, &mut to_seat) { done = true; }
+    if from_remote(early, &remote_ns, &seat_ns, &mut table, &mut subs, &mut to_seat, &mut to_remote) { done = true; }
 
     while !done {
         // what the seat asks
@@ -161,6 +251,7 @@ fn main() {
                         if id.split_once("::").map_or(false, |(n, _)| n == remote_ns) { to_remote.push(Op::Wr { wid, id, prop, value }); }
                         else { to_seat.push(Op::Res { wid, refused: Some(format!("not a node of {remote_ns}: {id}")) }); }
                     }
+                    Event::Op(Op::Res { wid, refused }) => to_remote.push(Op::Res { wid, refused }),
                     Event::Op(op @ (Op::Sub { .. } | Op::Unsub { .. } | Op::Read { .. } | Op::Query { .. } | Op::Resync { .. } | Op::Pause { .. })) => to_remote.push(op),
                     Event::Failed { .. } | Event::Closed { .. } => done = true,
                     _ => {}
@@ -172,9 +263,10 @@ fn main() {
         while let Ok(Some(f)) = tcp.recv() {
             let (events, reply) = remote.receive(f);
             if let Some(r) = reply { let _ = tcp.send(&r); }
-            if from_remote(events, &remote_ns, &mut table, &mut to_seat) { done = true; }
+            if from_remote(events, &remote_ns, &seat_ns, &mut table, &mut subs, &mut to_seat, &mut to_remote) { done = true; }
         }
         if tcp.is_closed() { done = true; }
+        subs.relay(&reader, cfg.spins, cfg.depth, &mut to_remote);
         if !to_remote.is_empty() { if let Ok(f) = remote.send(std::mem::take(&mut to_remote)) { let _ = tcp.send(&f); } }
         if !to_seat.is_empty() { if let Ok(f) = seat.send(std::mem::take(&mut to_seat)) { let _ = ctl.send(&f); } }
         if !done { nap(); }
