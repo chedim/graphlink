@@ -1,17 +1,19 @@
 [package]
 name = "graphlink-cli"
-version = "0.0.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "graphlink: serve a few nodes, watch them, write one (a debugging tool and a demo peer for graphlink-core)"
-license = "MIT"
-publish = false
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "graphlink"
 path = "src/main.rs"
 
 [dependencies]
-graphlink-core = { path = "../graphlink-core" }
-graphlink-net = { path = "../graphlink-net", features = ["tls"] }
-graphlink-auth = { path = "../graphlink-auth" }
+graphlink-core = { workspace = true }
+graphlink-net = { workspace = true, features = ["tls"] }
+graphlink-auth = { workspace = true }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
