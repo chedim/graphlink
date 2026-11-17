@@ -6,6 +6,9 @@ description = "graphlink-bridge: TCP outward, shared memory inward: joins a seat
 license = "MIT"
 publish = false
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "graphlink-bridge"
 path = "src/main.rs"
