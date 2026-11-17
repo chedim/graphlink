@@ -1,0 +1,18 @@
+[package]
+name = "graphlink-bridge"
+version = "0.0.1"
+edition = "2021"
+description = "graphlink-bridge: TCP outward, shared memory inward: joins a seat to a remote peer without a socket in the seat"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "graphlink-bridge"
+path = "src/main.rs"
+
+[dependencies]
+graphlink-core = { path = "../graphlink-core" }
+graphlink-net = { path = "../graphlink-net" }
+graphlink-shm = { path = "../graphlink-shm" }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+
