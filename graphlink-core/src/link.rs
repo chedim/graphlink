@@ -14,7 +14,7 @@ pub struct Me { pub ns: String, pub build: String, pub epoch: f64, pub support: 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     /// the peer's hello was taken and a version is agreed
-    Opened { peer_ns: String, peer_build: String, peer_epoch: f64, have: BTreeMap<String, f64>, version: u32 },
+    Opened { peer_ns: String, peer_build: String, peer_epoch: f64, have: BTreeMap<String, f64>, version: u32, peer_token: Option<String> },
     /// an op from the peer, in order, once
     Op(Op),
     /// a frame already taken was dropped
@@ -41,10 +41,13 @@ enum State { Idle, Opening, Open, Closed }
 #[derive(Clone, Debug, PartialEq)]
 enum Upgrade { None, Proposed(Proposal), Incoming(Proposal) }
 
-pub struct Link { me: Me, state: State, version: u32, hello_seen: bool, inbox: Inbox, outbox: Outbox, upgrade: Upgrade }
+pub struct Link { token: Option<String>, me: Me, state: State, version: u32, hello_seen: bool, inbox: Inbox, outbox: Outbox, upgrade: Upgrade }
 
 impl Link {
-    pub fn new(me: Me) -> Link { Link { me, state: State::Idle, version: VERSION, hello_seen: false, inbox: Inbox::default(), outbox: Outbox::default(), upgrade: Upgrade::None } }
+    pub fn new(me: Me) -> Link { Link { token: None, me, state: State::Idle, version: VERSION, hello_seen: false, inbox: Inbox::default(), outbox: Outbox::default(), upgrade: Upgrade::None } }
+
+    /// The credential this side puts in its `hello` (a JWT string); the receiving side checks it, the link only carries it.
+    pub fn with_token(mut self, token: String) -> Link { self.token = Some(token); self }
 
     pub fn is_open(&self) -> bool { self.state == State::Open }
 
@@ -52,7 +55,7 @@ impl Link {
 
     /// The first frame: our `hello`, written in the highest version we speak (a hello is decodable in every version).
     pub fn open(&mut self) -> Frame {
-        let hello = Op::Hello { ns: self.me.ns.clone(), build: self.me.build.clone(), epoch: self.me.epoch, have: BTreeMap::new(), support: self.me.support.clone() };
+        let hello = Op::Hello { ns: self.me.ns.clone(), build: self.me.build.clone(), epoch: self.me.epoch, have: BTreeMap::new(), support: self.me.support.clone(), token: self.token.clone() };
         if self.state == State::Idle { self.state = if self.hello_seen { State::Open } else { State::Opening }; }
         self.outbox.frame(self.highest(), &self.inbox, vec![hello])
     }
@@ -101,12 +104,12 @@ impl Link {
         let mut reply = None;
         for op in frame.ops {
             match op {
-                Op::Hello { ns, build, epoch, have, support } => match negotiate(&self.me.support, &support) {
+                Op::Hello { ns, build, epoch, have, support, token } => match negotiate(&self.me.support, &support) {
                     Negotiated::Speak(version) => {
                         self.version = version;
                         self.hello_seen = true;
                         if self.state == State::Opening { self.state = State::Open; }
-                        events.push(Event::Opened { peer_ns: ns, peer_build: build, peer_epoch: epoch, have, version });
+                        events.push(Event::Opened { peer_ns: ns, peer_build: build, peer_epoch: epoch, have, version, peer_token: token });
                     }
                     Negotiated::Failed(failed) => {
                         self.state = State::Closed;

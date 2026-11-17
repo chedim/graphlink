@@ -115,7 +115,7 @@ fn a_frame_in_a_version_not_negotiated_is_refused() {
 }
 
 fn hello_frame(n: u64, support: &[u32]) -> Frame {
-    Frame { v: 1, n, ack: 0, ops: vec![Op::Hello { ns: "peer".into(), build: "t".into(), epoch: 1.0, have: Default::default(), support: support.to_vec() }] }
+    Frame { v: 1, n, ack: 0, ops: vec![Op::Hello { ns: "peer".into(), build: "t".into(), epoch: 1.0, have: Default::default(), support: support.to_vec(), token: None }] }
 }
 
 #[test]
@@ -167,4 +167,26 @@ fn a_hello_that_arrives_before_we_open_opens_the_link_when_we_do() {
     assert_eq!((hello.n, hello.ack), (1, 1), "our first frame acknowledges theirs");
     assert!(l.is_open());
     assert_eq!(l.send(vec![]).unwrap().v, 2, "frames are written in the agreed version");
+}
+
+#[test]
+fn a_hello_carries_the_token_its_link_was_given_and_the_peer_sees_it() {
+    let (mut ta, mut tb) = pipe();
+    let (mut a, mut b) = (Link::new(me("kitchen", &[1])).with_token("a.b.c".into()), Link::new(me("seat", &[1])));
+    ta.send(&a.open()).unwrap();
+    tb.send(&b.open()).unwrap();
+    let eb = pump(&mut b, &mut tb);   // what `a` sent
+    assert!(matches!(&eb[..], [Event::Opened { peer_ns, peer_token: Some(t), .. }] if peer_ns == "kitchen" && t == "a.b.c"), "{eb:?}");
+    let ea = pump(&mut a, &mut ta);   // what `b` sent: no token
+    assert!(matches!(&ea[..], [Event::Opened { peer_token: None, .. }]), "a hello with no token shows none: {ea:?}");
+}
+
+#[test]
+fn a_hello_with_a_token_survives_the_wire_and_a_hello_without_one_has_no_token_field() {
+    use graphlink_core::frame::Frame;
+    let with = Frame { v: 1, n: 1, ack: 0, ops: vec![Op::Hello { ns: "k".into(), build: "t".into(), epoch: 1.0, have: Default::default(), support: vec![1], token: Some("x.y.z".into()) }] };
+    assert_eq!(Frame::decode(&with.encode()).unwrap(), with);
+    let without = Frame { ops: vec![Op::Hello { ns: "k".into(), build: "t".into(), epoch: 1.0, have: Default::default(), support: vec![1], token: None }], ..with.clone() };
+    assert!(without.encode().to_string().find("token").is_none(), "{}", without.encode());
+    assert_eq!(Frame::decode(&without.encode()).unwrap(), without);
 }

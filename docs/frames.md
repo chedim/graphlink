@@ -15,7 +15,7 @@ The unit of ordering is the **frame**, a JSON object (the CBOR encoding for devi
 
 | `op` | fields | meaning |
 |---|---|---|
-| `hello` | `ns`, `build`, `epoch`, `have`, `support` | open: who I am, my boot epoch, the revision I hold per subscribed id (`have`, empty on first join), and every protocol version I can speak (`support`, a non-empty list) |
+| `hello` | `ns`, `build`, `epoch`, `have`, `support`, `token` | open: who I am (`token`, optional: my credential, a JWT; the receiving side that asks for one checks it with `graphlink-auth::check_hello`: it must verify and its `ns` claim must be the `ns` of this hello; omitted from the wire when there is none), my boot epoch, the revision I hold per subscribed id (`have`, empty on first join), and every protocol version I can speak (`support`, a non-empty list) |
 | `failed` | `support`, `why` | the answer to a `hello` with no version in common; `support` is what the sender speaks; the sender closes after it |
 | `sub` | `id` or `prefix`, `props?`, `limit?` | subscribe; a prefix is bounded by `limit` and REFUSED, not truncated, when more match |
 | `unsub` | `id` or `prefix` | drop |
@@ -55,8 +55,8 @@ Two peers that began on one transport (TCP) may move to another (shared memory) 
 
 ## A link and a transport
 
-- **`Link`** is the state machine of one link to one peer, with no I/O. `open()` returns our `hello` (frame 1, written in the highest version we speak). `receive(frame)` takes a frame from the peer and returns events for the engine, and maybe a frame to send straight back. `send(ops)` returns the next frame once the link is open (our hello sent and the peer's taken); before that it is an error.
-- **Events:** `Opened` (the peer's hello and the agreed version), `Op` (an op from the peer, in order, once), `Duplicate`, `Gap`, `Failed` (no version in common, or the peer said so), `Closed` (the peer said `bye`; its `Op(Bye)` is delivered first), `Refused` (an op before the peer's hello, or a frame in a version that was not negotiated). A frame that is a duplicate or a gap delivers no ops. A closed link ignores everything.
+- **`Link`** is the state machine of one link to one peer, with no I/O (`with_token` sets the credential its `hello` carries; the link only carries it, it never verifies). `open()` returns our `hello` (frame 1, written in the highest version we speak). `receive(frame)` takes a frame from the peer and returns events for the engine, and maybe a frame to send straight back. `send(ops)` returns the next frame once the link is open (our hello sent and the peer's taken); before that it is an error.
+- **Events:** `Opened` (the peer's hello, with its `peer_token`, and the agreed version), `Op` (an op from the peer, in order, once), `Duplicate`, `Gap`, `Failed` (no version in common, or the peer said so), `Closed` (the peer said `bye`; its `Op(Bye)` is delivered first), `Refused` (an op before the peer's hello, or a frame in a version that was not negotiated). A frame that is a duplicate or a gap delivers no ops. A closed link ignores everything.
 - **`Transport`** is the one edge that touches the outside: `send(&Frame)` queues a frame, `recv()` returns the next frame that arrived or `None`, and neither waits. The library starts no thread for it; the engine polls it at the end of a round. `pipe()` gives two connected in-memory ends (frames cross as JSON) for tests.
 
 ## Decisions (the operator's; nothing here sets them)
