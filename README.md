@@ -33,6 +33,25 @@ Nothing here is published to crates.io; use it as a git dependency.
 
 Not built yet (design only): the CBOR encoding, the store trait (what the engine gives the library), shared memory, the C interface and the language bindings. `docs/frames.md` lists the decisions that are still the operator's.
 
+## Crates
+
+| Crate | What it is |
+|---|---|
+| `graphlink-core` | the protocol: frames, the counters, the link state machine, the transport trait, the subscription table |
+| `graphlink-net` | a TCP transport: one JSON frame per line, non-blocking (`Tcp`, `Listener`) |
+| `graphlink-cli` | the `graphlink` tool: a demo peer and a debugging aid |
+
+## The `graphlink` tool
+
+```
+graphlink serve 127.0.0.1:7070 --ns kitchen --nodes nodes.json    # own the nodes of the file: {"kitchen::Lamp:desk": {"power": "off"}}
+graphlink watch 127.0.0.1:7070 kitchen::Lamp:desk                 # print the node as one JSON line, now and at every change
+graphlink watch 127.0.0.1:7070 --prefix kitchen::                 # every node under a prefix
+graphlink write 127.0.0.1:7070 kitchen::Lamp:desk power '"on"'    # prints ok, or "refused: why" and exits 1
+```
+
+`serve` answers `sub`, `unsub`, `read`, `wr` and the paged `q`; a write bumps the node's revision and is pushed to every subscriber. Nodes live in memory and are not saved.
+
 ## Using it
 
 Add it as a git dependency, pinned to a commit:

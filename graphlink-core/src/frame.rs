@@ -25,7 +25,8 @@ pub enum Op {
     Failed { support: Vec<u32>, why: String },
     Sub { target: Target, props: Option<Vec<String>>, limit: Option<u64> },
     Unsub { target: Target },
-    Val { id: String, r: f64, body: ValBody },
+    /// `rid` names the `read` this answers; a pushed value has none
+    Val { id: String, r: f64, rid: Option<String>, body: ValBody },
     Read { id: String, props: Vec<String>, rid: String },
     Wr { wid: String, id: String, prop: String, value: J },
     /// `refused: None` is `ok`
@@ -110,7 +111,7 @@ impl Op {
                     else if m.get("gone").and_then(J::as_bool) == Some(true) { ValBody::Gone }
                     else if let Some(why) = m.get("refused").and_then(J::as_str) { ValBody::Refused(why.to_string()) }
                     else { return Err("`val` needs `props`, `gone` or `refused`".into()); };
-                Op::Val { id: text(m, name, "id")?, r: number(m, name, "r")?, body }
+                Op::Val { id: text(m, name, "id")?, r: number(m, name, "r")?, rid: m.get("rid").and_then(J::as_str).map(str::to_string), body }
             }
             "read" => Op::Read { id: text(m, name, "id")?, props: strings(m.get("props").unwrap_or(&J::Null), name, "props")?, rid: text(m, name, "rid")? },
             "wr" => Op::Wr { wid: text(m, name, "wid")?, id: text(m, name, "id")?, prop: text(m, name, "prop")?, value: m.get("value").cloned().ok_or("`wr` needs `value`")? },
@@ -160,8 +161,9 @@ impl Op {
                 op("sub", &mut m)
             }
             Op::Unsub { target } => { put_target(&mut m, target); op("unsub", &mut m) }
-            Op::Val { id, r, body } => {
+            Op::Val { id, r, rid, body } => {
                 m.insert("id".into(), json!(id)); m.insert("r".into(), json!(r));
+                if let Some(q) = rid { m.insert("rid".into(), json!(q)); }
                 match body { ValBody::Props(p) => { m.insert("props".into(), p.clone()); } ValBody::Gone => { m.insert("gone".into(), json!(true)); } ValBody::Refused(w) => { m.insert("refused".into(), json!(w)); } }
                 op("val", &mut m)
             }

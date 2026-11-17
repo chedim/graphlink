@@ -14,9 +14,10 @@ fn a_frame_with_every_op_survives_encode_then_decode() {
         Op::Sub { target: Target::Id("kitchen::Lamp:desk".into()), props: Some(vec!["power".into()]), limit: None },
         Op::Sub { target: Target::Prefix("kitchen::".into()), props: None, limit: Some(50) },
         Op::Unsub { target: Target::Id("kitchen::Lamp:desk".into()) },
-        Op::Val { id: "kitchen::Lamp:desk".into(), r: 13.0, body: ValBody::Props(json!({"power": "on"})) },
-        Op::Val { id: "kitchen::Lamp:old".into(), r: 2.0, body: ValBody::Gone },
-        Op::Val { id: "kitchen::Safe:1".into(), r: 1.0, body: ValBody::Refused("not yours".into()) },
+        Op::Val { id: "kitchen::Lamp:desk".into(), r: 13.0, rid: None, body: ValBody::Props(json!({"power": "on"})) },
+        Op::Val { id: "kitchen::Lamp:desk".into(), r: 13.0, rid: Some("r1".into()), body: ValBody::Props(json!({"level": 3})) },
+        Op::Val { id: "kitchen::Lamp:old".into(), r: 2.0, rid: None, body: ValBody::Gone },
+        Op::Val { id: "kitchen::Safe:1".into(), r: 1.0, rid: None, body: ValBody::Refused("not yours".into()) },
         Op::Read { id: "kitchen::Lamp:desk".into(), props: vec!["level".into()], rid: "r1".into() },
         Op::Wr { wid: "w1".into(), id: "kitchen::Lamp:desk".into(), prop: "power".into(), value: json!("off") },
         Op::Res { wid: "w1".into(), refused: None },
@@ -36,8 +37,8 @@ fn a_frame_with_every_op_survives_encode_then_decode() {
 fn the_wire_shape_is_the_one_in_the_spec() {
     let f = Frame { v: 1, n: 7, ack: 4, ops: vec![Op::Sub { target: Target::Id("a::B:c".into()), props: Some(vec!["x".into()]), limit: None }] };
     assert_eq!(f.encode(), json!({"v": 1, "n": 7, "ack": 4, "ops": [{"op": "sub", "id": "a::B:c", "props": ["x"]}]}));
-    let g = Frame { v: 1, n: 8, ack: 7, ops: vec![Op::Res { wid: "w".into(), refused: Some("no".into()) }, Op::Val { id: "e".into(), r: 1.0, body: ValBody::Gone }] };
-    assert_eq!(g.encode(), json!({"v": 1, "n": 8, "ack": 7, "ops": [{"op": "res", "wid": "w", "refused": "no"}, {"op": "val", "id": "e", "r": 1.0, "gone": true}]}));
+    let g = Frame { v: 1, n: 8, ack: 7, ops: vec![Op::Res { wid: "w".into(), refused: Some("no".into()) }, Op::Val { id: "e".into(), r: 1.0, rid: Some("r9".into()), body: ValBody::Gone }] };
+    assert_eq!(g.encode(), json!({"v": 1, "n": 8, "ack": 7, "ops": [{"op": "res", "wid": "w", "refused": "no"}, {"op": "val", "id": "e", "r": 1.0, "rid": "r9", "gone": true}]}));
 }
 
 #[test]
