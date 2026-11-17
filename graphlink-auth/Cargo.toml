@@ -1,0 +1,10 @@
+[package]
+name = "graphlink-auth"
+version = "0.0.1"
+edition = "2021"
+description = "graphlink-auth: HS256 tokens (JWT) for graphlink peers; std only: SHA-256, HMAC and base64url are written here"
+license = "MIT"
+publish = false
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }

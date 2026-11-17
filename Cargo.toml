@@ -1,3 +1,3 @@
 [workspace]
-members = ["graphlink-core", "graphlink-net", "graphlink-cli", "graphlink-shm", "graphlink-bridge"]
+members = ["graphlink-core", "graphlink-net", "graphlink-cli", "graphlink-shm", "graphlink-bridge", "graphlink-auth"]
 resolver = "2"
