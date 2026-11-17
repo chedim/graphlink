@@ -9,7 +9,7 @@ fn roundtrip(f: &Frame) -> Frame { Frame::decode(&f.encode()).expect("decodes") 
 #[test]
 fn a_frame_with_every_op_survives_encode_then_decode() {
     let f = Frame { v: VERSION, n: 7, ack: 4, ops: vec![
-        Op::Hello { ns: "kitchen".into(), build: "b1".into(), epoch: 3.0, have: BTreeMap::from([("kitchen::Lamp:desk".to_string(), 12.0)]), support: vec![1] },
+        Op::Hello { ns: "kitchen".into(), build: "b1".into(), epoch: 3.0, have: BTreeMap::from([("kitchen::Lamp:desk".to_string(), 12.0)]), support: vec![1], token: None },
         Op::Failed { support: vec![1, 2], why: "no common version".into() },
         Op::Sub { target: Target::Id("kitchen::Lamp:desk".into()), props: Some(vec!["power".into()]), limit: None },
         Op::Sub { target: Target::Prefix("kitchen::".into()), props: None, limit: Some(50) },

@@ -25,7 +25,8 @@ pub enum ValBody { Props(J), Gone, Refused(String) }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Op {
-    Hello { ns: String, build: String, epoch: f64, have: BTreeMap<String, f64>, support: Vec<u32> },
+    /// `token`: the sender's credential (a JWT string), when the receiving side asks for one; omitted from the wire when there is none
+    Hello { ns: String, build: String, epoch: f64, have: BTreeMap<String, f64>, support: Vec<u32>, token: Option<String> },
     Failed { support: Vec<u32>, why: String },
     Sub { target: Target, props: Option<Vec<String>>, limit: Option<u64> },
     Unsub { target: Target },
@@ -124,7 +125,7 @@ impl Op {
                 let support: Vec<u32> = m.get("support").and_then(J::as_array).map(|a| a.iter().filter_map(|x| x.as_u64().map(|x| x as u32)).collect()).unwrap_or_default();
                 if support.is_empty() { return Err("`hello` needs `support`, a non-empty list of versions".into()); }
                 let have = have(m, name)?;
-                Op::Hello { ns: text(m, name, "ns")?, build: text(m, name, "build")?, epoch: number(m, name, "epoch")?, have, support }
+                Op::Hello { ns: text(m, name, "ns")?, build: text(m, name, "build")?, epoch: number(m, name, "epoch")?, have, support, token: m.get("token").and_then(J::as_str).map(str::to_string) }
             }
             "failed" => {
                 let support = m.get("support").and_then(J::as_array).map(|a| a.iter().filter_map(|x| x.as_u64().map(|x| x as u32)).collect()).ok_or("`failed` needs `support` (a list)")?;
@@ -181,7 +182,8 @@ impl Op {
         let mut m = Map::new();
         let op = |name: &str, m: &mut Map<String, J>| { let mut o = Map::new(); o.insert("op".into(), json!(name)); o.extend(std::mem::take(m)); J::Object(o) };
         match self {
-            Op::Hello { ns, build, epoch, have, support } => {
+            Op::Hello { ns, build, epoch, have, support, token } => {
+                if let Some(t) = token { m.insert("token".into(), json!(t)); }
                 m.insert("ns".into(), json!(ns)); m.insert("build".into(), json!(build)); m.insert("epoch".into(), json!(epoch));
                 put_have(&mut m, have); m.insert("support".into(), json!(support));
                 op("hello", &mut m)

@@ -64,3 +64,27 @@ fn a_short_secret_a_bad_subject_and_a_bad_life_are_refused_at_mint() {
     assert!(mint(SECRET, "p", "P", 0.0, NOW).is_err());
     assert!(verify("x.y.z", b"short", NOW).is_err());
 }
+
+// ---- a hello's token: who the peer may be --------------------------------------------------------------------------------------------------------
+
+use graphlink_auth::check_hello;
+
+#[test]
+fn a_hello_is_taken_when_its_token_is_valid_and_names_the_namespace_the_hello_claims() {
+    let t = mint_with(SECRET, "kitchen-bridge", "Kitchen", &[("ns", json!("kitchen"))], 60.0, NOW).unwrap();
+    let c = check_hello(Some(&t), "kitchen", &["membrane"], SECRET, NOW).unwrap();
+    assert_eq!(c["sub"], json!("kitchen-bridge"));
+}
+
+#[test]
+fn a_hello_is_refused_for_no_token_a_bad_token_another_namespace_no_namespace_or_a_reserved_one() {
+    let ns = |v: &str| mint_with(SECRET, "p", "P", &[("ns", json!(v))], 60.0, NOW).unwrap();
+    assert!(check_hello(None, "kitchen", &[], SECRET, NOW).unwrap_err().contains("token"));
+    assert!(check_hello(Some("a.b.c"), "kitchen", &[], SECRET, NOW).is_err());
+    assert!(check_hello(Some(&ns("hall")), "kitchen", &[], SECRET, NOW).unwrap_err().contains("namespace"), "the token says hall, the hello says kitchen");
+    let none = mint(SECRET, "p", "P", 60.0, NOW).unwrap();
+    assert!(check_hello(Some(&none), "kitchen", &[], SECRET, NOW).unwrap_err().contains("namespace"), "a token with no ns owns nothing");
+    assert!(check_hello(Some(&ns("membrane")), "membrane", &["membrane"], SECRET, NOW).unwrap_err().contains("reserved"));
+    assert!(check_hello(Some(&ns("a::b")), "a::b", &[], SECRET, NOW).is_err(), "a namespace has no ::");
+    assert!(check_hello(Some(&ns("")), "", &[], SECRET, NOW).is_err());
+}

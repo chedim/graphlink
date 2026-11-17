@@ -149,3 +149,18 @@ pub fn verify(token: &str, secret: &[u8], now: f64) -> Result<J, String> {
     }
     Ok(claims)
 }
+
+/// What a receiving side does with a `hello`: the token must verify, and its `ns` claim must be the namespace the hello claims. A token with no `ns` owns nothing; a namespace is a
+/// non-empty name with no `::`; a name in `reserved` (the seat's own) is never granted. Returns the token's claims; the refusal text says what failed (tell the peer only `refused: auth`).
+pub fn check_hello(token: Option<&str>, hello_ns: &str, reserved: &[&str], secret: &[u8], now: f64) -> Result<J, String> {
+    let token = token.ok_or("the hello carries no token")?;
+    let claims = verify(token, secret, now)?;
+    match claims.get("ns").and_then(J::as_str) {
+        Some(ns) if ns == hello_ns => {}
+        Some(ns) => return Err(format!("namespace: the token says {ns:?}, the hello says {hello_ns:?}")),
+        None => return Err("namespace: the token names none, so its holder owns nothing".into()),
+    }
+    if hello_ns.is_empty() || hello_ns.contains("::") { return Err("namespace: a namespace is a non-empty name without `::`".into()); }
+    if reserved.contains(&hello_ns) { return Err(format!("namespace: {hello_ns:?} is reserved")); }
+    Ok(claims)
+}
