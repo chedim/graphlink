@@ -32,7 +32,7 @@ Nothing here is published to crates.io; use it as a git dependency.
 | `transport::Transport`, `transport::pipe` | the one edge to the outside (`send`, a non-blocking `recv`), and an in-memory pair for tests |
 | `frame::negotiate` | the highest protocol version two peers share, or the `failed` op to answer with |
 
-Not built yet (design only): the shared-memory transport and the CBOR frame encoding (the value coder itself is built), the store trait (what the engine gives the library), shared memory, the C interface and the language bindings. `docs/frames.md` lists the decisions that are still the operator's.
+Not built yet (design only): the shared-memory transport, the CBOR encoding of whole frames (the value coder itself is built), the store trait (what the engine gives the library), the C interface and the language bindings. `docs/frames.md` lists the decisions that are still the operator's.
 
 ## Crates
 
