@@ -416,3 +416,61 @@ fn a_bare_id_is_the_seats_own_node_for_a_remotes_write() {
     seat.send(vec![Op::Res { wid, refused: None }]);
     assert_eq!(String::from_utf8_lossy(&out.wait_with_output().unwrap().stdout).trim(), "ok");
 }
+
+// ---- a bridge a seat restarts ------------------------------------------------------------------------------------------------------------------
+
+#[test]
+fn a_bridge_started_again_clears_the_cell_table_its_dead_predecessor_left() {
+    let remote = serve();
+    let name = peer_name();
+    let _names = Names(name.clone());
+    let mut ctl = Shm::create(format!("/gl-{name}-ctl"), 4096).unwrap();
+    let _sc = Cells::create(format!("/gl-{name}-sc"), 16, 64, 256, 1).unwrap();
+    // what a bridge killed with -9 leaves behind: its own region name
+    std::mem::forget(Cells::create(format!("/gl-{name}-pc"), 8, 16, 16, 1).unwrap());
+    let mut link = Link::new(Me { ns: "membrane".into(), build: "t".into(), epoch: 1.0, support: vec![VERSION], initiator: true });
+    ctl.send(&link.open()).unwrap();
+    let mut b = Kill(Command::new(BRIDGE).args(["connect", &remote.addr, "--peer", &name, "--slots", "64", "--key-cap", "128", "--val-cap", "1024", "--epoch", "1", "--spins", "1000", "--depth", "8"])
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap());
+    let end = Instant::now() + Duration::from_secs(10);
+    let mut opened = false;
+    while Instant::now() < end && !opened {
+        while let Ok(Some(f)) = ctl.recv() { let (ev, reply) = link.receive(f); if ev.iter().any(|e| matches!(e, Event::Opened { .. })) { opened = true; } if let Some(r) = reply { ctl.send(&r).unwrap(); } }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut err = String::new();
+    if !opened { let _ = b.0.kill(); if let Some(e) = b.0.stderr.as_mut() { let _ = e.read_to_string(&mut err); } }
+    assert!(opened, "the bridge could not start over a stale cell table: {err}");
+}
+
+#[test]
+fn a_bridge_told_to_die_with_its_parent_ends_when_its_parent_is_gone() {
+    let remote = serve();
+    let name = peer_name();
+    let _names = Names(name.clone());
+    let mut ctl = Shm::create(format!("/gl-{name}-ctl"), 4096).unwrap();
+    let _sc = Cells::create(format!("/gl-{name}-sc"), 16, 64, 256, 1).unwrap();
+    let mut link = Link::new(Me { ns: "membrane".into(), build: "t".into(), epoch: 1.0, support: vec![VERSION], initiator: true });
+    ctl.send(&link.open()).unwrap();
+    // a shell starts the bridge in the background, prints its pid, stays a moment and exits: the bridge is orphaned (it names the shell as its parent, as a supervising seat names itself)
+    let cmd = format!("GRAPHLINK_PARENT=$$ {BRIDGE} connect {} --peer {name} --slots 64 --key-cap 128 --val-cap 1024 --epoch 1 --spins 1000 --depth 8 --die-with-parent >/dev/null 2>&1 </dev/null & echo $!; sleep 2", remote.addr);
+    let mut shell = Command::new("sh").arg("-c").arg(cmd).stdout(Stdio::piped()).spawn().unwrap();
+    let mut first = String::new();
+    BufReader::new(shell.stdout.as_mut().unwrap()).read_line(&mut first).unwrap();
+    let pid: i32 = first.trim().parse().expect("the shell printed the bridge's pid");
+    // the bridge must have opened its link first: an orphan that never started proves nothing
+    let end = Instant::now() + Duration::from_secs(10);
+    let mut opened = false;
+    while Instant::now() < end && !opened {
+        while let Ok(Some(f)) = ctl.recv() { let (ev, reply) = link.receive(f); if ev.iter().any(|e| matches!(e, Event::Opened { .. })) { opened = true; } if let Some(r) = reply { ctl.send(&r).unwrap(); } }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(opened, "the bridge never opened its link");
+    let _ = shell.wait();   // the parent is gone now
+    let alive = |pid: i32| Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().map_or(false, |s| s.success());
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end && alive(pid) { std::thread::sleep(Duration::from_millis(20)); }
+    let still = alive(pid);
+    if still { let _ = Command::new("kill").arg(pid.to_string()).status(); }
+    assert!(!still, "the orphaned bridge is still running");
+}
