@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
