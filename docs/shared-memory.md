@@ -22,9 +22,9 @@ A link carries frames: messages, encoded, copied. Two peers on one machine can d
 
 - A value is ONE definite-length CBOR item (RFC 8949). Allowed: UTF-8 text strings, integers, floats, `true`, `false`, `null`, arrays, and maps with text-string keys. Not allowed: byte strings, tags, NaN, infinities, indefinite lengths, non-text keys. This is exactly what JSON can hold, so a value round-trips to JSON text without loss (the wire frames and cliffvm's journal stay JSON).
 - Integers are written in the shortest form. Floats are always written as 64-bit (a decision: it is a little larger than the shortest form, and it keeps equal numbers equal bytes).
-- **Equal values give equal bytes**, so "did this cell change?" (early cutoff) is a byte comparison. This holds only if the encoding is deterministic; the open question of key order is below.
+- **Key order is part of the bytes.** A map's keys are written in the order the map holds them (decided by the operator); `{a,b}` and `{b,a}` are different bytes. The VM's own equality (`py_eq` in cliffvm's `expr.rs`) ignores key order, so byte equality is STRICTER than the VM's: a pure reorder is a change in the bytes and not in the VM's eyes. Early cutoff on bytes can therefore only do extra work, never miss a change; an owner that wants the VM's exact cutoff compares decoded values first. Nothing in c1f can list a dict's keys, so no logic depends on the order, only what is printed or journalled.
 - CBOR is self-delimiting, so a reader can walk one item; it never trusts a length: every offset and length is checked against the region, and a malformed item is an error for that cell, not a crash.
-- The encoder and decoder are small, hand written in `graphlink-core`, with no dependency, and tested against the example vectors of RFC 8949.
+- The encoder and decoder are built: `graphlink_core::cbor` (`encode`, and `decode` with a nesting limit the caller gives), hand written with no dependency, tested against the example vectors of RFC 8949 and against the refusals above. `decode` reads a float of any width and always keeps the order the keys came in.
 
 ## 4. One consistent read (a seqlock per slot)
 
@@ -44,7 +44,7 @@ CBOR for MQTT, serial and other devices (the same value bytes, copied into a CBO
 
 ## 7. Decisions for the operator (none is taken)
 
-1. **Key order.** cliffvm keeps map keys in insertion order. Deterministic CBOR (RFC 8949, section 4.2) sorts keys, which loses that order. Either keep insertion order and let a pure reorder count as a change, or sort and give up the order. Needs the answer to: does any c1f code depend on key order?
+1. **Key order: decided** (insertion order, see section 3).
 2. **Floats always 64-bit,** or the shortest lossless form.
 3. **Sizes:** slots, arena, ring; the maximum value and key size; the nesting limit.
 4. **The stuck-writer time** and the arena reclaim rule (section 4).
