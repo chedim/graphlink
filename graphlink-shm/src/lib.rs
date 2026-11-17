@@ -59,6 +59,15 @@ pub(crate) fn open_region(name: &str, create_len: Option<usize>, writable: bool)
     Ok(file)
 }
 
+/// Remove a region name a creator left behind (it died without dropping its end). `Ok(true)` when a name was removed, `Ok(false)` when there was none. Only for a name the
+/// caller owns: a live creator's region would lose its name (its mapped memory stays valid, but no one new can attach).
+pub fn remove_region(name: &str) -> Result<bool, String> {
+    let c = check_name(name)?;
+    if unsafe { shm_unlink(c.as_ptr()) } == 0 { return Ok(true); }
+    let e = std::io::Error::last_os_error();
+    if e.kind() == std::io::ErrorKind::NotFound { Ok(false) } else { Err(format!("cannot remove region {name}: {e}")) }
+}
+
 pub(crate) fn unlink_region(name: &str) { if let Ok(c) = CString::new(name) { unsafe { shm_unlink(c.as_ptr()); } } }
 
 /// A region of zeros that is not a graphlink region, removed when this is dropped (for the tests of what attach refuses).
