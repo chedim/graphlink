@@ -4,7 +4,7 @@ resolver = "2"
 
 # One version for every crate: a release publishes them all at that version (the tag is `v<version>`: .github/workflows/publish.yml)
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/chedim/graphlink"
@@ -13,7 +13,7 @@ categories = ["network-programming"]
 
 # the crates depend on each other by path in the tree and by version once published: the version here is the workspace's own, bumped with it
 [workspace.dependencies]
-graphlink-core = { path = "graphlink-core", version = "0.1.0" }
-graphlink-auth = { path = "graphlink-auth", version = "0.1.0" }
-graphlink-net = { path = "graphlink-net", version = "0.1.0" }
-graphlink-shm = { path = "graphlink-shm", version = "0.1.0" }
+graphlink-core = { path = "graphlink-core", version = "0.1.1" }
+graphlink-auth = { path = "graphlink-auth", version = "0.1.1" }
+graphlink-net = { path = "graphlink-net", version = "0.1.1" }
+graphlink-shm = { path = "graphlink-shm", version = "0.1.1" }
