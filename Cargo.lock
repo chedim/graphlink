@@ -25,6 +25,7 @@ dependencies = [
 name = "graphlink-bridge"
 version = "0.0.1"
 dependencies = [
+ "graphlink-auth",
  "graphlink-core",
  "graphlink-net",
  "graphlink-shm",
@@ -35,6 +36,7 @@ dependencies = [
 name = "graphlink-cli"
 version = "0.0.1"
 dependencies = [
+ "graphlink-auth",
  "graphlink-core",
  "graphlink-net",
  "serde_json",

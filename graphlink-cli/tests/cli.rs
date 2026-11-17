@@ -152,3 +152,68 @@ fn a_paged_query_by_prefix_and_by_class_answers_with_rows_a_next_and_a_total() {
     let by_class = ask(&s.addr, vec![Op::Query { qid: "q3".into(), by: QueryBy::Class("Door".into()), after: None, limit: None }], |o| matches!(o, Op::Page { .. }));
     assert_eq!(by_class, Op::Page { qid: "q3".into(), rows: vec![json!({"id": "hall::Door:front"})], next: None, total: Some(1) });
 }
+
+// ---- tokens: who may talk to a serving peer -------------------------------------------------------------------------------------------------------
+
+fn secret_file() -> std::path::PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let p = std::env::temp_dir().join(format!("graphlink-cli-secret-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+    // every file holds its own secret (64 hex characters made of the counter)
+    std::fs::write(&p, format!("{:0>64x}", (std::process::id() as u64) << 20 | N.load(Ordering::SeqCst))).unwrap();
+    p
+}
+fn mint(secret: &std::path::Path, ns: &str) -> String {
+    let o = Command::new(BIN).args(["token", "mint", "--secret-file"]).arg(secret).args(["--sub", "tester", "--ns", ns, "--ttl", "300"]).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+fn token_file(token: &str) -> std::path::PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let p = std::env::temp_dir().join(format!("graphlink-cli-token-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+    std::fs::write(&p, token).unwrap();
+    p
+}
+fn serve_with_secret(secret: &std::path::Path) -> Serve {
+    let mut child = Command::new(BIN).args(["serve", "127.0.0.1:0", "--ns", "kitchen", "--nodes"]).arg(nodes_file()).arg("--secret-file").arg(secret).stdout(Stdio::piped()).spawn().unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+    Serve { child, addr: line.trim().strip_prefix("listening ").unwrap().to_string() }
+}
+fn write_as(addr: &str, extra: &[&str]) -> (bool, String) {
+    let o = Command::new(BIN).args(["write", addr, "kitchen::Lamp:desk", "power", "\"on\""]).args(extra).output().unwrap();
+    (o.status.success(), String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+#[test]
+fn a_minted_token_names_its_namespace_and_needs_a_life() {
+    let secret = secret_file();
+    let t = mint(&secret, "garage");
+    let c = graphlink_auth::verify(&t, std::fs::read_to_string(&secret).unwrap().trim().as_bytes(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()).unwrap();
+    assert_eq!((c["sub"].as_str(), c["ns"].as_str()), (Some("tester"), Some("garage")));
+    let o = Command::new(BIN).args(["token", "mint", "--secret-file"]).arg(&secret).args(["--sub", "x", "--ns", "garage"]).output().unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--ttl"), "no default life");
+}
+
+#[test]
+fn a_serving_peer_with_a_secret_takes_only_a_hello_whose_token_names_the_hellos_namespace() {
+    let secret = secret_file();
+    let s = serve_with_secret(&secret);
+    let (ok, out) = write_as(&s.addr, &[]);
+    assert!(!ok && out.contains("refused: auth"), "no token: {out}");
+    let other = token_file(&mint(&secret, "garage"));
+    let (ok, out) = write_as(&s.addr, &["--token-file", other.to_str().unwrap()]);   // the hello says graphlink-cli, the token says garage
+    assert!(!ok && out.contains("refused: auth"), "another namespace: {out}");
+    let good = token_file(&mint(&secret, "garage"));
+    let (ok, out) = write_as(&s.addr, &["--token-file", good.to_str().unwrap(), "--ns", "garage"]);
+    assert!(ok, "{out}");
+    let forged = token_file(&mint(&secret_file(), "graphlink-cli"));
+    let (ok, out) = write_as(&s.addr, &["--token-file", forged.to_str().unwrap()]);
+    assert!(!ok && out.contains("refused: auth"), "another secret: {out}");
+}
+
+#[test]
+fn a_peer_with_no_secret_asks_for_no_token() {
+    let s = serve();
+    assert!(write_as(&s.addr, &[]).0);
+}

@@ -2,6 +2,8 @@
 //! cell table a seat makes for a declared peer), and what the bridge says about itself is the remote's own namespace.
 //!
 //!   graphlink-bridge connect <addr> --peer <name> --slots <n> --key-cap <n> --val-cap <n> --epoch <n> --spins <n> --depth <n>
+//!   (optional: --token-file <f> the token the seat minted for this peer, put in the hello to the seat; --remote-token-file <f> the token the remote asks for, put in the hello to the remote;
+//!    --secret-file <f> check every remote hello: its token must verify and name the remote's namespace; required with --allow-remote)
 //!   graphlink-bridge listen  <addr> --peer <name> ... the same ... [--allow-remote]   wait for the remote to connect (a loopback address unless --allow-remote)
 //!
 //! The seat makes `/gl-<name>-ctl` (control rings) and `/gl-<name>-sc` (its own cell table) first; the bridge attaches the rings, connects to `<addr>`, learns the remote's namespace from its
@@ -17,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::process::exit;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use graphlink_auth::check_hello;
 use graphlink_core::frame::{Frame, Op, Target, ValBody, VERSION};
 use graphlink_core::link::{Event, Link, Me};
 use graphlink_core::transport::Transport;
@@ -32,16 +35,22 @@ fn usage(msg: &str) -> ! {
     exit(2)
 }
 
-struct Config { listen: bool, addr: String, peer: String, slots: u64, key_cap: u32, val_cap: u32, epoch: u64, spins: u64, depth: usize }
+struct Config { token_file: Option<String>, remote_token_file: Option<String>, secret_file: Option<String>, listen: bool, addr: String, peer: String, slots: u64, key_cap: u32, val_cap: u32, epoch: u64, spins: u64, depth: usize }
 
 fn parse(args: &[String]) -> Config {
     let listen = match args.first().map(String::as_str) { Some("connect") => false, Some("listen") => true, _ => usage("the command is `connect` or `listen`") };
     let addr = args.get(1).filter(|a| !a.starts_with("--")).unwrap_or_else(|| usage("connect and listen need an address")).clone();
     let mut allow_remote = false;
+    let mut optional: BTreeMap<&str, String> = BTreeMap::new();
     let mut given: BTreeMap<&str, String> = BTreeMap::new();
     let mut i = 2;
     while i < args.len() {
         if listen && args[i] == "--allow-remote" { allow_remote = true; i += 1; continue; }
+        if let Some(o) = ["--token-file", "--remote-token-file", "--secret-file"].iter().find(|o| **o == args[i]) {
+            optional.insert(o, args.get(i + 1).unwrap_or_else(|| usage(&format!("{o} needs a value"))).clone());
+            i += 2;
+            continue;
+        }
         let Some(opt) = OPTIONS.iter().find(|o| **o == args[i]) else { usage(&format!("unknown option {}", args[i])) };
         given.insert(opt, args.get(i + 1).unwrap_or_else(|| usage(&format!("{opt} needs a value"))).clone());
         i += 2;
@@ -54,7 +63,8 @@ fn parse(args: &[String]) -> Config {
         let loopback = addr.to_socket_addrs().map(|mut a| a.all(|x| x.ip().is_loopback())).unwrap_or(false);
         if !loopback { usage(&format!("{addr} is not a loopback address: a bridge listens on one only with --allow-remote")); }
     }
-    Config { listen, addr, peer: given["--peer"].clone(), slots: num(&given, "--slots"), key_cap: num(&given, "--key-cap"), val_cap: num(&given, "--val-cap"), epoch: num(&given, "--epoch"), spins: num(&given, "--spins"), depth: num(&given, "--depth") }
+    if allow_remote && !optional.contains_key("--secret-file") { usage("--allow-remote needs --secret-file: a bridge open beyond loopback must check every remote's token"); }
+    Config { token_file: optional.get("--token-file").cloned(), remote_token_file: optional.get("--remote-token-file").cloned(), secret_file: optional.get("--secret-file").cloned(), listen, addr, peer: given["--peer"].clone(), slots: num(&given, "--slots"), key_cap: num(&given, "--key-cap"), val_cap: num(&given, "--val-cap"), epoch: num(&given, "--epoch"), spins: num(&given, "--spins"), depth: num(&given, "--depth") }
 }
 
 fn fail(msg: &str) -> ! { eprintln!("graphlink-bridge: {msg}"); exit(1) }
@@ -192,38 +202,60 @@ pub fn run() {
 
     // the seat's end first: its rings, and the hello it has already sent
     let mut ctl = Shm::attach(format!("/gl-{}-ctl", cfg.peer)).unwrap_or_else(|e| fail(&format!("cannot attach the seat's control rings: {e}")));
-    let mut tcp = if cfg.listen {
-        let listener = Listener::bind(cfg.addr.as_str()).unwrap_or_else(|e| fail(&format!("cannot listen on {}: {e}", cfg.addr)));
-        println!("listening {}", listener.local_addr().unwrap());
-        use std::io::Write;
-        std::io::stdout().flush().ok();
-        loop {
-            match listener.accept() { Ok(Some(t)) => break t, Ok(None) => { if ctl.is_closed() { exit(0); } nap(); } Err(e) => fail(&format!("accept: {e}")) }
-        }
-    } else {
-        Tcp::connect(cfg.addr.as_str()).unwrap_or_else(|e| fail(&format!("cannot connect to {}: {e}", cfg.addr)))
-    };
     let seat_hello: Frame = loop {
         match ctl.recv() { Ok(Some(f)) => break f, Ok(None) => { if ctl.is_closed() { exit(0); } nap(); } Err(e) => fail(&format!("the seat's rings: {e}")) }
     };
     let seat_ns = seat_hello.ops.iter().find_map(|o| if let Op::Hello { ns, .. } = o { Some(ns.clone()) } else { None }).unwrap_or_else(|| fail("the seat's first frame is not a hello"));
+    let read = |path: &str| std::fs::read_to_string(path).unwrap_or_else(|e| fail(&format!("cannot read {path}: {e}"))).trim().to_string();
+    let secret: Option<Vec<u8>> = cfg.secret_file.as_deref().map(|p| read(p).into_bytes());
+    let remote_token: Option<String> = cfg.remote_token_file.as_deref().map(read);
+    let seat_token: Option<String> = cfg.token_file.as_deref().map(read);
 
-    // toward the remote: say the seat's namespace, learn the remote's
-    let mut remote = Link::new(me(&seat_ns, !cfg.listen));
-    let _ = tcp.send(&remote.open());
-    let mut early: Vec<Event> = vec![];
-    let remote_ns = loop {
-        match tcp.recv() {
-            Ok(Some(f)) => {
-                let (events, reply) = remote.receive(f);
-                if let Some(r) = reply { let _ = tcp.send(&r); }
-                if let Some(Event::Failed { why }) = events.iter().find(|e| matches!(e, Event::Failed { .. })) { fail(&format!("the remote refused: {why}")); }
-                let ns = events.iter().find_map(|e| if let Event::Opened { peer_ns, .. } = e { Some(peer_ns.clone()) } else { None });
-                early.extend(events.into_iter().filter(|e| matches!(e, Event::Op(_))));
-                if let Some(ns) = ns { break ns; }
+    // toward the remote. `listen`: serve the first remote whose hello is good (one that fails its check is told `refused: auth` and dropped, and the bridge listens on); `connect`: dial once.
+    let listener = if cfg.listen {
+        let l = Listener::bind(cfg.addr.as_str()).unwrap_or_else(|e| fail(&format!("cannot listen on {}: {e}", cfg.addr)));
+        println!("listening {}", l.local_addr().unwrap());
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        Some(l)
+    } else { None };
+    let (mut tcp, mut remote, remote_ns, early) = loop {
+        let mut tcp = match &listener {
+            Some(l) => loop {
+                match l.accept() { Ok(Some(t)) => break t, Ok(None) => { if ctl.is_closed() { exit(0); } nap(); } Err(e) => fail(&format!("accept: {e}")) }
+            },
+            None => Tcp::connect(cfg.addr.as_str()).unwrap_or_else(|e| fail(&format!("cannot connect to {}: {e}", cfg.addr))),
+        };
+        // say the seat's namespace (and the token the owner gave for the remote), learn the remote's
+        let mut link = Link::new(me(&seat_ns, !cfg.listen));
+        if let Some(t) = &remote_token { link = link.with_token(t.clone()); }
+        let _ = tcp.send(&link.open());
+        let mut early: Vec<Event> = vec![];
+        let verdict: Result<String, String> = loop {
+            match tcp.recv() {
+                Ok(Some(f)) => {
+                    let (events, reply) = link.receive(f);
+                    if let Some(r) = reply { let _ = tcp.send(&r); }
+                    if let Some(Event::Failed { why }) = events.iter().find(|e| matches!(e, Event::Failed { .. })) { break Err(format!("the remote refused: {why}")); }
+                    let opened = events.iter().find_map(|e| if let Event::Opened { peer_ns, peer_token, .. } = e { Some((peer_ns.clone(), peer_token.clone())) } else { None });
+                    early.extend(events.into_iter().filter(|e| matches!(e, Event::Op(_) | Event::Closed { .. })));
+                    if let Some((ns, token)) = opened {
+                        // with a secret the remote's hello must carry a token that verifies and names the hello's namespace (the seat's own is never granted)
+                        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+                        match secret.as_deref().map(|s| check_hello(token.as_deref(), &ns, &[seat_ns.as_str()], s, now)) {
+                            Some(Err(why)) => { if let Ok(f) = link.send(vec![Op::Bye { why: "refused: auth".into() }]) { let _ = tcp.send(&f); } break Err(format!("hello of {ns:?} refused: {why}")); }
+                            _ => break Ok(ns),
+                        }
+                    }
+                }
+                Ok(None) => { if tcp.is_closed() || ctl.is_closed() { if ctl.is_closed() { exit(0); } break Err("the remote went before its hello".into()); } nap(); }
+                Err(e) => break Err(e),
             }
-            Ok(None) => { if tcp.is_closed() || ctl.is_closed() { exit(0); } nap(); }
-            Err(e) => fail(&e),
+        };
+        match verdict {
+            Ok(ns) => break (tcp, link, ns, early),
+            Err(why) if cfg.listen => { eprintln!("graphlink-bridge: {why}"); }
+            Err(why) => fail(&why),
         }
     };
 
@@ -233,6 +265,7 @@ pub fn run() {
     let reader = CellsReader::attach(format!("/gl-{}-sc", cfg.peer)).unwrap_or_else(|e| fail(&format!("cannot attach the seat's cell table: {e}")));
     let mut subs = Subs::default();
     let mut seat = Link::new(me(&remote_ns, false));
+    if let Some(t) = &seat_token { seat = seat.with_token(t.clone()); }
     let _ = ctl.send(&seat.open());
     let (events, reply) = seat.receive(seat_hello);
     if let Some(r) = reply { let _ = ctl.send(&r); }
