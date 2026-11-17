@@ -1,10 +1,12 @@
 [package]
 name = "graphlink-bridge"
-version = "0.0.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "graphlink-bridge: TCP outward, shared memory inward: joins a seat to a remote peer without a socket in the seat"
-license = "MIT"
-publish = false
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lib]
 path = "src/lib.rs"
@@ -14,9 +16,9 @@ name = "graphlink-bridge"
 path = "src/main.rs"
 
 [dependencies]
-graphlink-core = { path = "../graphlink-core" }
-graphlink-net = { path = "../graphlink-net", features = ["tls"] }
-graphlink-auth = { path = "../graphlink-auth" }
-graphlink-shm = { path = "../graphlink-shm" }
+graphlink-core = { workspace = true }
+graphlink-net = { workspace = true, features = ["tls"] }
+graphlink-auth = { workspace = true }
+graphlink-shm = { workspace = true }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 

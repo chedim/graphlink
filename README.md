@@ -92,3 +92,7 @@ cargo test
 ```
 
 License: MIT.
+
+## Releases
+
+The crates (`graphlink-core`, `-auth`, `-net`, `-shm`, `-bridge`, `-cli`) share one version, `[workspace.package]` in `Cargo.toml` (and the four sibling `version`s of `[workspace.dependencies]`, which move with it). A release is: bump those, merge, then publish a GitHub release with the tag `v<version>`. `.github/workflows/publish.yml` then checks that the tag is the version of every crate, runs the tests and publishes all six to crates.io in dependency order (a pre-release publishes nothing). It needs the repository secret `CARGO_REGISTRY_TOKEN`. On every push and pull request the same workflow runs `cargo publish --workspace --dry-run`, which packages and builds each crate as crates.io would receive it and uploads nothing.

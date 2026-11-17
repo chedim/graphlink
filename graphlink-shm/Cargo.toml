@@ -1,11 +1,13 @@
 [package]
 name = "graphlink-shm"
-version = "0.0.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "A shared-memory transport for graphlink-core: two single-producer rings in a mapped file, no dependency"
-license = "MIT"
-publish = false
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-graphlink-core = { path = "../graphlink-core" }
+graphlink-core = { workspace = true }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }

@@ -1,13 +1,15 @@
 [package]
 name = "graphlink-net"
-version = "0.0.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "A TCP transport for graphlink-core: one JSON frame per line, non-blocking"
-license = "MIT"
-publish = false
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-graphlink-core = { path = "../graphlink-core" }
+graphlink-core = { workspace = true }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 
 [features]

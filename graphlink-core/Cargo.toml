@@ -1,10 +1,12 @@
 [package]
 name = "graphlink-core"
-version = "0.0.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "The graph link's protocol core: the subscription table and the replica notes (no network, no VM)"
-license = "MIT"
-publish = false
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
