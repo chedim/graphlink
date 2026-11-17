@@ -1,0 +1,16 @@
+name: test
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  cargo:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --workspace
+      - run: cargo run -q -p graphlink-core --example subs
