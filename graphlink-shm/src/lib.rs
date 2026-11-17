@@ -122,8 +122,12 @@ impl Shm {
         for (i, o) in out.iter_mut().enumerate() { *o = unsafe { *self.base.add(ring + RING_DATA + ((pos + i as u64) % size) as usize) }; }
     }
 
-    /// write as much of `pending` as the ring has room for, whole records only
-    fn flush(&mut self) {
+    /// How many bytes of frames still wait on this end because the ring was full. They go out when the reader makes room AND this end calls `flush`, `send` or `recv`: an end that
+    /// stops calling leaves them queued, so a sender that is finished keeps flushing until this is zero.
+    pub fn pending_bytes(&self) -> usize { self.pending.len() }
+
+    /// Write as much of the queue as the ring has room for now, whole frames only.
+    pub fn flush(&mut self) {
         let ring = self.tx();
         let (head, tail) = (self.u64_at(ring + RING_HEAD).load(Ordering::Relaxed), self.u64_at(ring + RING_TAIL).load(Ordering::Acquire));
         let mut head_now = head;
@@ -175,6 +179,7 @@ impl Transport for Shm {
 
 impl Drop for Shm {
     fn drop(&mut self) {
+        self.flush();   // a last try for what is still queued (what does not fit is lost: the reader was not keeping up)
         self.u32_at(if self.creator { H_CLOSED_CREATOR } else { H_CLOSED_ATTACHER }).store(1, Ordering::Release);
         unsafe { munmap(self.base as *mut c_void, self.len); }
         if let Some(p) = &self.path { let _ = std::fs::remove_file(p); }

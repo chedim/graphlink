@@ -115,17 +115,19 @@ fn two_threads_send_ten_thousand_frames_each_way_with_none_lost() {
     const N: u64 = 10_000;
     let t = std::thread::spawn(move || {
         let (mut sent, mut got) = (0u64, 0u64);
-        while sent < N || got < N {
+        while sent < N || got < N || b.pending_bytes() > 0 {
             if sent < N { b.send(&frame(sent, "b")).unwrap(); sent += 1; }
+            b.flush();
             while let Some(f) = b.recv().unwrap() { assert_eq!(f, frame(got, "a")); got += 1; }
         }
         b
     });
     let (mut sent, mut got) = (0u64, 0u64);
     let end = Instant::now() + Duration::from_secs(60);
-    while sent < N || got < N {
+    while sent < N || got < N || a.pending_bytes() > 0 {
         assert!(Instant::now() < end, "stuck at sent {sent} got {got}");
         if sent < N { a.send(&frame(sent, "a")).unwrap(); sent += 1; }
+        a.flush();
         while let Some(f) = a.recv().unwrap() { assert_eq!(f, frame(got, "b")); got += 1; }
     }
     let _b = t.join().unwrap();
@@ -155,4 +157,37 @@ fn another_process_attaches_and_frames_cross_between_the_two_processes() {
     while Instant::now() < end { if child.try_wait().unwrap().is_some() { return; } std::thread::sleep(Duration::from_millis(10)); }
     let _ = child.kill();
     panic!("the child did not end when the creator left");
+}
+
+#[test]
+fn frames_that_did_not_fit_stay_queued_on_the_sender_until_it_flushes_and_it_can_say_how_many_bytes_wait() {
+    let p = path();
+    let mut a = Shm::create(&p, 256).unwrap();
+    let mut b = Shm::attach(&p).unwrap();
+    assert_eq!(a.pending_bytes(), 0);
+    for i in 0..50u64 { a.send(&frame(i, "queued")).unwrap(); }
+    let waiting = a.pending_bytes();
+    assert!(waiting > 0, "a 256-byte ring cannot hold 50 frames");
+    // the reader drains what is in the ring; the sender's queue goes down only when the sender flushes
+    let mut got = 0;
+    while b.recv().unwrap().is_some() { got += 1; }
+    assert_eq!(a.pending_bytes(), waiting, "nothing moved without a call on the sender");
+    while a.pending_bytes() > 0 {
+        a.flush();
+        while b.recv().unwrap().is_some() { got += 1; }
+    }
+    assert_eq!(got, 50);
+}
+
+#[test]
+fn a_sender_that_goes_away_with_frames_queued_flushes_what_fits_on_the_way_out() {
+    let p = path();
+    let mut a = Shm::create(&p, 4096).unwrap();
+    let mut b = Shm::attach(&p).unwrap();
+    // the ring has room, so send() writes at once; to hold frames back, the reader first fills the other side
+    for i in 0..5u64 { a.send(&frame(i, "last words")).unwrap(); }
+    drop(a);
+    let mut n = 0;
+    while let Some(f) = b.recv().unwrap() { assert_eq!(f, frame(n, "last words")); n += 1; }
+    assert_eq!(n, 5, "what was written before the creator went is still readable");
 }
