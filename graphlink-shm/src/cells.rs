@@ -4,15 +4,12 @@
 //! `graphlink_core::cbor`). Slots have a fixed capacity for the key and the value, given when the table is made, so there is no allocator and nothing to reclaim: a value that does
 //! not fit is an error the owner sees, and the table has a fixed number of slots. Keys are never removed (a node that goes away becomes `Gone`), so a lookup stops at the first empty slot.
 //! Every byte a reader takes from the region is untrusted: lengths are checked against the capacities, and a bad slot is an error, never a panic or an out-of-bounds read.
-use std::fs::OpenOptions;
-use std::os::raw::c_void;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 
 use graphlink_core::cbor;
 use serde_json::Value as J;
 
-use crate::{map, map_read_only, unmap};
+use crate::{map, map_read_only, open_region, unlink_region, unmap};
 
 const MAGIC: u64 = u64::from_le_bytes(*b"GLNKCEL1");
 const LAYOUT: u32 = 1;
@@ -111,22 +108,21 @@ impl View {
 }
 
 /// The owner's end: creates the table, writes it, removes the file when it goes.
-pub struct Cells { v: View, len: usize, path: PathBuf, _file: std::fs::File }
+pub struct Cells { v: View, len: usize, name: String, _file: std::fs::File }
 
 unsafe impl Send for Cells {}
 
 impl Cells {
     /// `slots`: how many cells; `key_cap` and `val_cap`: the most bytes of a key and of an encoded value; `epoch`: told to readers so they can tell the owner restarted.
-    pub fn create(path: impl AsRef<Path>, slots: u64, key_cap: u32, val_cap: u32, epoch: u64) -> Result<Cells, String> {
+    pub fn create(name: impl AsRef<str>, slots: u64, key_cap: u32, val_cap: u32, epoch: u64) -> Result<Cells, String> {
         if slots == 0 { return Err("a table needs at least one slot".into()); }
         if key_cap == 0 || val_cap == 0 { return Err("the key and value capacities must be above zero".into()); }
-        let path = path.as_ref().to_path_buf();
+        let name = name.as_ref().to_string();
         let stride = S_KEY + up8(key_cap as usize) + up8(val_cap as usize);
         let len = HEADER + slots as usize * stride;
-        let file = OpenOptions::new().read(true).write(true).create_new(true).open(&path).map_err(|e| format!("cannot create {}: {e}", path.display()))?;
-        file.set_len(len as u64).map_err(|e| format!("cannot size {}: {e}", path.display()))?;
-        let base = map(&file, len)?;
-        let c = Cells { v: View { base, slots, key_cap: key_cap as usize, val_cap: val_cap as usize, stride }, len, path, _file: file };
+        let file = open_region(&name, Some(len), true)?;
+        let base = match map(&file, len) { Ok(b) => b, Err(e) => { unlink_region(&name); return Err(e); } };
+        let c = Cells { v: View { base, slots, key_cap: key_cap as usize, val_cap: val_cap as usize, stride }, len, name, _file: file };
         c.v.u32_at(H_LAYOUT).store(LAYOUT, Ordering::Relaxed);
         c.v.u64_at(H_SLOTS).store(slots, Ordering::Relaxed);
         c.v.u32_at(H_KEY_CAP).store(key_cap, Ordering::Relaxed);
@@ -201,7 +197,7 @@ impl Drop for Cells {
     fn drop(&mut self) {
         self.v.u32_at(H_CLOSED).store(1, Ordering::Release);
         unmap(self.v.base, self.len);
-        let _ = std::fs::remove_file(&self.path);
+        unlink_region(&self.name);
     }
 }
 
@@ -211,22 +207,22 @@ pub struct CellsReader { v: View, len: usize, _file: std::fs::File }
 unsafe impl Send for CellsReader {}
 
 impl CellsReader {
-    pub fn attach(path: impl AsRef<Path>) -> Result<CellsReader, String> {
-        let path = path.as_ref();
-        let file = OpenOptions::new().read(true).open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    pub fn attach(name: impl AsRef<str>) -> Result<CellsReader, String> {
+        let name = name.as_ref();
+        let file = open_region(name, None, false)?;
         let have = file.metadata().map_err(|e| e.to_string())?.len() as usize;
-        if have < HEADER { return Err(format!("{} is not a graphlink cell table (too small: {have} bytes)", path.display())); }
+        if have < HEADER { return Err(format!("{name} is not a graphlink cell table (too small: {have} bytes)")); }
         let head = map_read_only(&file, HEADER)?;
         let rd = |off: usize| unsafe { (&*(head.add(off) as *const AtomicU64)).load(Ordering::Acquire) };
         let (magic, layout, slots, caps) = (rd(H_MAGIC), unsafe { (&*(head.add(H_LAYOUT) as *const AtomicU32)).load(Ordering::Relaxed) }, rd(H_SLOTS), rd(H_KEY_CAP));
         unmap(head, HEADER);
-        if magic != MAGIC { return Err(format!("{} is not a graphlink cell table (no magic)", path.display())); }
-        if layout != LAYOUT { return Err(format!("{} has layout {layout}, this library speaks layout {LAYOUT}", path.display())); }
+        if magic != MAGIC { return Err(format!("{name} is not a graphlink cell table (no magic)")); }
+        if layout != LAYOUT { return Err(format!("{name} has layout {layout}, this library speaks layout {LAYOUT}")); }
         let (key_cap, val_cap) = ((caps & 0xffff_ffff) as usize, (caps >> 32) as usize);
-        if slots == 0 || key_cap == 0 || val_cap == 0 { return Err(format!("{} has an empty header", path.display())); }
+        if slots == 0 || key_cap == 0 || val_cap == 0 { return Err(format!("{name} has an empty header")); }
         let stride = S_KEY + up8(key_cap) + up8(val_cap);
         let len = slots.checked_mul(stride as u64).and_then(|n| n.checked_add(HEADER as u64)).ok_or("a table size that overflows")? as usize;
-        if have < len { return Err(format!("{} is too small for its own header ({have} bytes, {len} needed)", path.display())); }
+        if have < len { return Err(format!("{name} is too small for its own header ({have} bytes, {len} needed)")); }
         let base = map_read_only(&file, len)?;
         Ok(CellsReader { v: View { base, slots, key_cap, val_cap, stride }, len, _file: file })
     }
@@ -246,4 +242,3 @@ impl Drop for CellsReader {
     fn drop(&mut self) { unmap(self.v.base, self.len); }
 }
 
-const _: fn(*mut c_void) = |_| {};

@@ -1,5 +1,4 @@
 //! The cell table: one slot per `(eid, prop)` key, a seqlock per slot, CBOR values (docs/shared-memory.md, sections 2 to 4). The owner writes; readers map the file read-only.
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -9,9 +8,9 @@ use serde_json::json;
 const DEPTH: usize = 32;
 const SPINS: u64 = 1_000_000;
 
-fn path() -> PathBuf {
+fn path() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
-    std::env::temp_dir().join(format!("graphlink-cells-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)))
+    format!("/gl-c-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst))
 }
 fn pair(slots: u64, key_cap: u32, val_cap: u32) -> (Cells, CellsReader) {
     let p = path();
@@ -137,13 +136,13 @@ fn the_epoch_and_the_closed_flag_are_readable_and_the_owner_removes_the_file() {
     assert!(!r.is_closed());
     drop(w);
     assert!(r.is_closed());
-    assert!(!p.exists());
+    assert!(CellsReader::attach(&p).err().unwrap().contains("cannot open"), "the name is gone with the owner");
 }
 
 #[test]
 fn attaching_to_something_that_is_not_a_table_says_what() {
     let p = path();
-    std::fs::write(&p, vec![0u8; 4096]).unwrap();
+    let _junk = graphlink_shm::junk_region_for_test(&p, 4096).unwrap();
     assert!(CellsReader::attach(&p).err().unwrap().contains("not a graphlink cell table"));
     assert!(CellsReader::attach(path()).err().unwrap().contains("cannot open"));
     assert!(Cells::create(path(), 0, 16, 16, 1).err().unwrap().contains("slot"));

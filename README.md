@@ -40,7 +40,7 @@ Not built yet (design only): the shared-memory transport, the CBOR encoding of w
 |---|---|
 | `graphlink-core` | the protocol: frames, the counters, the link state machine, the transport trait, the subscription table |
 | `graphlink-net` | a TCP transport: one JSON frame per line, non-blocking (`Tcp`, `Listener`) |
-| `graphlink-shm` | shared memory (Unix), no dependency: `Shm` is a transport (two rings in a mapped file, one per direction); `cells::Cells` and `cells::CellsReader` are the cell table (one slot per `(eid, prop)` key, a seqlock per slot, CBOR values, the owner writes and a reader maps it read-only) |
+| `graphlink-shm` | shared memory (Unix), no dependency: `Shm` is a transport (two rings in a named region, one per direction); `cells::Cells` and `cells::CellsReader` are the cell table (one slot per `(eid, prop)` key, a seqlock per slot, CBOR values, the owner writes and a reader maps it read-only) |
 | `graphlink-cli` | the `graphlink` tool: a demo peer and a debugging aid |
 
 ## The `graphlink` tool

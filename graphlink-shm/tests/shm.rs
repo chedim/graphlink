@@ -1,5 +1,4 @@
 //! The shared-memory transport: two rings in a mapped file, one per direction (docs/shared-memory.md, the control ring first).
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -7,9 +6,10 @@ use graphlink_core::frame::{Frame, Op};
 use graphlink_core::transport::Transport;
 use graphlink_shm::Shm;
 
-fn path() -> PathBuf {
+/// a region name: short (macOS allows 31 characters) and unique per process and call
+fn path() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
-    std::env::temp_dir().join(format!("graphlink-shm-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)))
+    format!("/gl-s-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst))
 }
 fn frame(n: u64, why: &str) -> Frame { Frame { v: 1, n, ack: 0, ops: vec![Op::Bye { why: why.into() }] } }
 fn recv_within(t: &mut Shm, ms: u64) -> Option<Frame> {
@@ -74,13 +74,31 @@ fn a_frame_bigger_than_the_ring_is_an_error_naming_the_size() {
 #[test]
 fn attaching_to_something_that_is_not_a_region_is_an_error_that_says_what() {
     let p = path();
-    std::fs::write(&p, vec![0u8; 4096]).unwrap();
+    let _junk = graphlink_shm::junk_region_for_test(&p, 4096).unwrap();
     let e = Shm::attach(&p).err().unwrap();
     assert!(e.contains("not a graphlink region"), "{e}");
     assert!(Shm::attach(path()).err().unwrap().contains("cannot open"));
     let p2 = path();
-    std::fs::write(&p2, b"short").unwrap();
-    assert!(Shm::attach(&p2).err().unwrap().contains("too small"));
+    let _small = graphlink_shm::junk_region_for_test(&p2, 5).unwrap();
+    let e2 = Shm::attach(&p2).err().unwrap();
+    assert!(e2.contains("too small") || e2.contains("not a graphlink region"), "{e2} (a system may round a region up to a page)");
+}
+
+#[test]
+fn a_name_that_cannot_be_a_region_name_is_refused_before_the_system_is_asked() {
+    let long = format!("/{}", "x".repeat(40));
+    for bad in ["no-leading-slash", "/two/slashes", "/", "", long.as_str()] {
+        let e = Shm::create(bad, 4096).err().unwrap();
+        assert!(e.contains("region name"), "{bad:?}: {e}");
+        assert!(Shm::attach(bad).err().unwrap().contains("region name"), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_name_that_is_taken_cannot_be_created_again() {
+    let p = path();
+    let _a = Shm::create(&p, 4096).unwrap();
+    assert!(Shm::create(&p, 4096).err().unwrap().contains("cannot create"));
 }
 
 #[test]
@@ -99,12 +117,12 @@ fn a_peer_that_goes_away_is_noticed() {
 }
 
 #[test]
-fn the_creator_removes_the_file_when_it_goes() {
+fn the_creator_removes_the_name_when_it_goes() {
     let p = path();
     let a = Shm::create(&p, 4096).unwrap();
-    assert!(p.exists());
+    assert!(Shm::attach(&p).is_ok(), "the name is there while the creator is");
     drop(a);
-    assert!(!p.exists());
+    assert!(Shm::attach(&p).err().unwrap().contains("cannot open"), "and gone after");
 }
 
 #[test]
