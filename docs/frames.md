@@ -43,6 +43,16 @@ The unit of ordering is the **frame**, a JSON object (the CBOR encoding for devi
 - `ack` only moves forward and never names a frame that was not sent; an ack that does either is ignored by the sender (`Outbox::acked` says so).
 - How many frames may be unacknowledged before the sender stops (the window) is not set here: it is a number for the operator.
 
+## Upgrade (moving a link to another transport or encoding)
+
+Two peers that began on one transport (TCP) may move to another (shared memory) or to another encoding (CBOR) without losing their place.
+- `upgrade` carries a proposal: `transport: "shm"` with `name` (the name of the region the PROPOSER made: the acceptor opens that name and nothing else, and checks the region's magic before trusting a byte of it), `ring_bytes`, `slots`, `key_cap`, `val_cap` (the capacities it was made with, all the proposer's numbers); or `encoding: "json" | "cbor"`. Exactly one of `transport` and `encoding`.
+- The peer answers `upgraded` (the same proposal, copied) when it has attached, or `upgrade_refused` with a `why` when it cannot (another machine, no permission, no such region): the link stays on the transport it had.
+- Between `upgrade` and its answer the proposer sends nothing (`Link::send` is an error; the caller holds its frames). On the answer both sides switch, and **the counters go on**: the frame after `upgraded` is the next `n`. TCP carries nothing between the two, so frame order is kept, and it may be closed after the switch.
+- A peer that gets an `upgrade` while its own is pending refuses it with a `Refused` event (which of two proposals wins is not set: a decision for the operator). An `upgraded` or `upgrade_refused` nobody asked for is refused.
+- A region NAME, not a path: on Unix a `shm_open` name (RAM only; macOS allows 31 characters at most, so a name is short and unique: a label of the namespace, a unique token, and the part); on Windows a named file mapping, later. Which backend is the crate's business; the op does not change.
+- `Link` is sans-I/O here too: `propose`, `accept_upgrade` and `refuse_upgrade` return frames, `Event::UpgradeProposed`, `Upgraded` and `UpgradeRefused` tell the caller; the caller attaches the region and switches the transport.
+
 ## A link and a transport
 
 - **`Link`** is the state machine of one link to one peer, with no I/O. `open()` returns our `hello` (frame 1, written in the highest version we speak). `receive(frame)` takes a frame from the peer and returns events for the engine, and maybe a frame to send straight back. `send(ops)` returns the next frame once the link is open (our hello sent and the peer's taken); before that it is an error.

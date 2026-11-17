@@ -15,6 +15,10 @@ pub enum Target { Id(String), Prefix(String) }
 #[derive(Clone, Debug, PartialEq)]
 pub enum QueryBy { Prefix(String), Class(String) }
 
+/// What an upgrade moves the link to: a shared-memory transport (the region is named by the proposer, who made it, with the capacities it was made with), or another encoding.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Proposal { Shm { name: String, ring_bytes: u64, slots: u64, key_cap: u32, val_cap: u32 }, Encoding(String) }
+
 /// What a `val` says about its node.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ValBody { Props(J), Gone, Refused(String) }
@@ -39,6 +43,10 @@ pub enum Op {
     Resync { have: BTreeMap<String, f64> },
     /// the peer is hidden: the owner stops sending `val` and keeps only revisions; `Resync` wakes it
     Pause { have: BTreeMap<String, f64> },
+    /// move the link to another transport or encoding (the counters go on); answered by `Upgraded` or `UpgradeRefused`
+    Upgrade(Proposal),
+    Upgraded(Proposal),
+    UpgradeRefused { why: String },
     /// an op this version does not know, kept as it came
     Unknown(J),
 }
@@ -81,6 +89,28 @@ fn have(m: &Map<String, J>, op: &str) -> Result<BTreeMap<String, f64>, String> {
         .map(|(k, v)| v.as_f64().map(|r| (k.clone(), r)).ok_or_else(|| format!("`{op}` `have` maps ids to numbers"))).collect()
 }
 fn put_have(m: &mut Map<String, J>, h: &BTreeMap<String, f64>) { m.insert("have".into(), J::Object(h.iter().map(|(k, r)| (k.clone(), json!(r))).collect())); }
+fn proposal(m: &Map<String, J>, op: &str) -> Result<Proposal, String> {
+    match (m.get("transport"), m.get("encoding")) {
+        (Some(J::String(t)), None) if t == "shm" => {
+            let num = |k: &str| m.get(k).and_then(J::as_u64).ok_or_else(|| format!("`{op}` of a shm transport needs `{k}` (a number)"));
+            let (key_cap, val_cap) = (num("key_cap")?, num("val_cap")?);
+            Ok(Proposal::Shm { name: text(m, op, "name")?, ring_bytes: num("ring_bytes")?, slots: num("slots")?, key_cap: u32::try_from(key_cap).map_err(|_| "`key_cap` is too big".to_string())?, val_cap: u32::try_from(val_cap).map_err(|_| "`val_cap` is too big".to_string())? })
+        }
+        (Some(J::String(t)), None) => Err(format!("`{op}`: a transport this library does not know: {t}")),
+        (None, Some(J::String(e))) if e == "json" || e == "cbor" => Ok(Proposal::Encoding(e.clone())),
+        (None, Some(e)) => Err(format!("`{op}`: an encoding this library does not know: {e}")),
+        _ => Err(format!("`{op}` needs exactly one of `transport` and `encoding`")),
+    }
+}
+fn put_proposal(m: &mut Map<String, J>, p: &Proposal) {
+    match p {
+        Proposal::Shm { name, ring_bytes, slots, key_cap, val_cap } => {
+            m.insert("transport".into(), json!("shm")); m.insert("name".into(), json!(name)); m.insert("ring_bytes".into(), json!(ring_bytes));
+            m.insert("slots".into(), json!(slots)); m.insert("key_cap".into(), json!(key_cap)); m.insert("val_cap".into(), json!(val_cap));
+        }
+        Proposal::Encoding(e) => { m.insert("encoding".into(), json!(e)); }
+    }
+}
 fn put_target(m: &mut Map<String, J>, t: &Target) {
     match t { Target::Id(i) => { m.insert("id".into(), json!(i)); } Target::Prefix(p) => { m.insert("prefix".into(), json!(p)); } }
 }
@@ -124,6 +154,9 @@ impl Op {
                 Op::Res { wid: text(m, name, "wid")?, refused }
             }
             "bye" => Op::Bye { why: text(m, name, "why")? },
+            "upgrade" => Op::Upgrade(proposal(m, name)?),
+            "upgraded" => Op::Upgraded(proposal(m, name)?),
+            "upgrade_refused" => Op::UpgradeRefused { why: text(m, name, "why")? },
             "q" => {
                 let by = match (m.get("prefix").and_then(J::as_str), m.get("class").and_then(J::as_str)) {
                     (Some(p), None) => QueryBy::Prefix(p.to_string()),
@@ -175,6 +208,9 @@ impl Op {
                 op("res", &mut m)
             }
             Op::Bye { why } => { m.insert("why".into(), json!(why)); op("bye", &mut m) }
+            Op::Upgrade(p) => { put_proposal(&mut m, p); op("upgrade", &mut m) }
+            Op::Upgraded(p) => { put_proposal(&mut m, p); op("upgraded", &mut m) }
+            Op::UpgradeRefused { why } => { m.insert("why".into(), json!(why)); op("upgrade_refused", &mut m) }
             Op::Query { qid, by, after, limit } => {
                 m.insert("qid".into(), json!(qid));
                 match by { QueryBy::Prefix(p) => { m.insert("prefix".into(), json!(p)); } QueryBy::Class(c) => { m.insert("class".into(), json!(c)); } }
