@@ -3,8 +3,7 @@
 A library for **GraphLink**, the protocol that joins separate cliffhanger VMs into one graph: a backend seat and a page, a seat and a device, a seat and a driver process.
 It is the part of the protocol that needs no VM and no network; the VM ([cliffvm](https://github.com/chedim/babyseat)) and the transports are on the other side of it.
 
-**Status: early.** One crate exists and one piece of the protocol is built (section "What is built"). The rest is design, kept in the babyseat repo: `docs/graph-link.md` (the protocol) and `docs/waves.md` (how it meets the engine's rounds).
-Nothing here is published to crates.io; use it as a git dependency.
+**Status: 0.1.1, published on crates.io** (`graphlink-core`, `-auth`, `-net`, `-shm`, `-bridge`, `-cli`). The protocol core, a TCP and a shared-memory transport, tokens, TLS and a bridge between a seat and a remote are built and tested; the cliffvm seat uses them (babyseat 0.7.63). What is not built is listed under "What is built". The design and its decisions are in the babyseat repo: `docs/graph-link.md` (the protocol and the seat's side, section 18) and `docs/waves.md` (how it meets the engine's rounds).
 
 ## The idea
 
@@ -17,7 +16,7 @@ Nothing here is published to crates.io; use it as a git dependency.
 
 ## What is built
 
-`graphlink-core` 0.0.1, moved unchanged out of cliffvm:
+`graphlink-core` (its `LinkSubs`, `Replica` and `Link` were moved out of cliffvm; the rest of the crate grew here):
 
 | Item | What it is |
 |---|---|
@@ -32,7 +31,7 @@ Nothing here is published to crates.io; use it as a git dependency.
 | `transport::Transport`, `transport::pipe` | the one edge to the outside (`send`, a non-blocking `recv`), and an in-memory pair for tests |
 | `frame::negotiate` | the highest protocol version two peers share, or the `failed` op to answer with |
 
-Not built yet (design only): the shared-memory transport, the CBOR encoding of whole frames (the value coder itself is built), the store trait (what the engine gives the library), the C interface and the language bindings. `docs/frames.md` lists the decisions that are still the operator's.
+Not built yet: CBOR encoding of whole frames (the value coder itself is built; the control rings carry JSON), the store trait (what an engine gives the library), the C interface and the language bindings, a Windows backend for the named regions, the upgrade of a link from TCP to shared memory (the `upgrade` op and its link state are built; the programs do not act on it), a heartbeat for a program that hangs without ending, and a seat writing a node of another seat. `docs/frames.md` lists the decisions that are still the operator's.
 
 ## Crates
 
@@ -58,12 +57,13 @@ graphlink write 127.0.0.1:7070 kitchen::Lamp:desk power '"on"'    # prints ok, o
 
 ## Using it
 
-Add it as a git dependency, pinned to a commit:
-
-```toml
-[dependencies]
-graphlink-core = { git = "https://github.com/chedim/graphlink", rev = "<commit>" }
 ```
+cargo add graphlink-core            # the protocol; add graphlink-net or graphlink-shm for a transport, graphlink-auth for tokens
+cargo install graphlink-cli          # the `graphlink` tool
+cargo install graphlink-bridge       # the bridge between a seat and a remote
+```
+
+Or as a git dependency pinned to a commit: `graphlink-core = { git = "https://github.com/chedim/graphlink", rev = "<commit>" }`.
 
 At the end of every engine round, tell the table what the VM's rules read, and send whatever it drains to the owner (`graphlink-core/examples/subs.rs`, run with `cargo run -p graphlink-core --example subs`):
 
@@ -88,7 +88,7 @@ A transport is a thread (or a few) that only moves frames in and out; the engine
 ## Tests
 
 ```
-cargo test
+cargo test --workspace
 ```
 
 License: MIT.
