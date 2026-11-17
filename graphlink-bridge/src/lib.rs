@@ -4,6 +4,8 @@
 //!   graphlink-bridge connect <addr> --peer <name> --slots <n> --key-cap <n> --val-cap <n> --epoch <n> --spins <n> --depth <n>
 //!   (optional: --token-file <f> the token the seat minted for this peer, put in the hello to the seat; --remote-token-file <f> the token the remote asks for, put in the hello to the remote;
 //!    --secret-file <f> check every remote hello: its token must verify and name the remote's namespace; required with --allow-remote)
+//!   (TLS: `listen --tls-dir <dir> [--tls-san <name>]...` speaks TLS with a self-signed certificate made in <dir> at the first run (its names: the address, `localhost` when it is loopback, and the --tls-san ones);
+//!    `connect --tls-cert <file> [--tls-name <name>]` trusts exactly that certificate and checks it covers the name dialled)
 //!   graphlink-bridge listen  <addr> --peer <name> ... the same ... [--allow-remote]   wait for the remote to connect (a loopback address unless --allow-remote)
 //!
 //! The seat makes `/gl-<name>-ctl` (control rings) and `/gl-<name>-sc` (its own cell table) first; the bridge attaches the rings, connects to `<addr>`, learns the remote's namespace from its
@@ -35,18 +37,20 @@ fn usage(msg: &str) -> ! {
     exit(2)
 }
 
-struct Config { token_file: Option<String>, remote_token_file: Option<String>, secret_file: Option<String>, listen: bool, addr: String, peer: String, slots: u64, key_cap: u32, val_cap: u32, epoch: u64, spins: u64, depth: usize }
+struct Config { tls_dir: Option<String>, tls_cert: Option<String>, tls_name: Option<String>, sans: Vec<String>, token_file: Option<String>, remote_token_file: Option<String>, secret_file: Option<String>, listen: bool, addr: String, peer: String, slots: u64, key_cap: u32, val_cap: u32, epoch: u64, spins: u64, depth: usize }
 
 fn parse(args: &[String]) -> Config {
     let listen = match args.first().map(String::as_str) { Some("connect") => false, Some("listen") => true, _ => usage("the command is `connect` or `listen`") };
     let addr = args.get(1).filter(|a| !a.starts_with("--")).unwrap_or_else(|| usage("connect and listen need an address")).clone();
     let mut allow_remote = false;
+    let mut sans: Vec<String> = vec![];
     let mut optional: BTreeMap<&str, String> = BTreeMap::new();
     let mut given: BTreeMap<&str, String> = BTreeMap::new();
     let mut i = 2;
     while i < args.len() {
         if listen && args[i] == "--allow-remote" { allow_remote = true; i += 1; continue; }
-        if let Some(o) = ["--token-file", "--remote-token-file", "--secret-file"].iter().find(|o| **o == args[i]) {
+        if args[i] == "--tls-san" { sans.push(args.get(i + 1).unwrap_or_else(|| usage("--tls-san needs a value")).clone()); i += 2; continue; }
+        if let Some(o) = ["--token-file", "--remote-token-file", "--secret-file", "--tls-dir", "--tls-cert", "--tls-name"].iter().find(|o| **o == args[i]) {
             optional.insert(o, args.get(i + 1).unwrap_or_else(|| usage(&format!("{o} needs a value"))).clone());
             i += 2;
             continue;
@@ -64,7 +68,9 @@ fn parse(args: &[String]) -> Config {
         if !loopback { usage(&format!("{addr} is not a loopback address: a bridge listens on one only with --allow-remote")); }
     }
     if allow_remote && !optional.contains_key("--secret-file") { usage("--allow-remote needs --secret-file: a bridge open beyond loopback must check every remote's token"); }
-    Config { token_file: optional.get("--token-file").cloned(), remote_token_file: optional.get("--remote-token-file").cloned(), secret_file: optional.get("--secret-file").cloned(), listen, addr, peer: given["--peer"].clone(), slots: num(&given, "--slots"), key_cap: num(&given, "--key-cap"), val_cap: num(&given, "--val-cap"), epoch: num(&given, "--epoch"), spins: num(&given, "--spins"), depth: num(&given, "--depth") }
+    if listen && (optional.contains_key("--tls-cert") || optional.contains_key("--tls-name")) { usage("--tls-cert and --tls-name are for `connect`; a listening bridge has --tls-dir"); }
+    if !listen && (optional.contains_key("--tls-dir") || !sans.is_empty()) { usage("--tls-dir and --tls-san are for `listen`; a connecting bridge has --tls-cert"); }
+    Config { tls_dir: optional.get("--tls-dir").cloned(), tls_cert: optional.get("--tls-cert").cloned(), tls_name: optional.get("--tls-name").cloned(), sans, token_file: optional.get("--token-file").cloned(), remote_token_file: optional.get("--remote-token-file").cloned(), secret_file: optional.get("--secret-file").cloned(), listen, addr, peer: given["--peer"].clone(), slots: num(&given, "--slots"), key_cap: num(&given, "--key-cap"), val_cap: num(&given, "--val-cap"), epoch: num(&given, "--epoch"), spins: num(&given, "--spins"), depth: num(&given, "--depth") }
 }
 
 fn fail(msg: &str) -> ! { eprintln!("graphlink-bridge: {msg}"); exit(1) }
@@ -213,7 +219,13 @@ pub fn run() {
 
     // toward the remote. `listen`: serve the first remote whose hello is good (one that fails its check is told `refused: auth` and dropped, and the bridge listens on); `connect`: dial once.
     let listener = if cfg.listen {
-        let l = Listener::bind(cfg.addr.as_str()).unwrap_or_else(|e| fail(&format!("cannot listen on {}: {e}", cfg.addr)));
+        let mut l = Listener::bind(cfg.addr.as_str()).unwrap_or_else(|e| fail(&format!("cannot listen on {}: {e}", cfg.addr)));
+        if let Some(dir) = &cfg.tls_dir {
+            // TLS: the certificate is made here at the first run (the names: the address, `localhost` for a loopback one, and --tls-san), before the bridge says it listens, so a client can read it
+            let dir = std::path::Path::new(dir);
+            graphlink_net::tls::make_certs(dir, &graphlink_net::tls::sans_for(l.local_addr().unwrap().ip(), &cfg.sans)).unwrap_or_else(|e| fail(&e));
+            l = l.with_tls(graphlink_net::tls::TlsServer::from_files(&dir.join("cert.pem"), &dir.join("key.pem")).unwrap_or_else(|e| fail(&e)));
+        }
         println!("listening {}", l.local_addr().unwrap());
         use std::io::Write;
         std::io::stdout().flush().ok();
@@ -224,7 +236,13 @@ pub fn run() {
             Some(l) => loop {
                 match l.accept() { Ok(Some(t)) => break t, Ok(None) => { if ctl.is_closed() { exit(0); } nap(); } Err(e) => fail(&format!("accept: {e}")) }
             },
-            None => Tcp::connect(cfg.addr.as_str()).unwrap_or_else(|e| fail(&format!("cannot connect to {}: {e}", cfg.addr))),
+            None => match &cfg.tls_cert {
+                None => Tcp::connect(cfg.addr.as_str()),
+                Some(cert) => {
+                    let client = graphlink_net::tls::TlsClient::trusting(std::path::Path::new(cert)).unwrap_or_else(|e| fail(&e));
+                    Tcp::connect_tls(cfg.addr.as_str(), cfg.tls_name.as_deref().unwrap_or(graphlink_net::tls::host_of(&cfg.addr)), &client)
+                }
+            }.unwrap_or_else(|e| fail(&format!("cannot connect to {}: {e}", cfg.addr))),
         };
         // say the seat's namespace (and the token the owner gave for the remote), learn the remote's
         let mut link = Link::new(me(&seat_ns, !cfg.listen));

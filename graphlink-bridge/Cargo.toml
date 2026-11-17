@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 graphlink-core = { path = "../graphlink-core" }
-graphlink-net = { path = "../graphlink-net" }
+graphlink-net = { path = "../graphlink-net", features = ["tls"] }
 graphlink-auth = { path = "../graphlink-auth" }
 graphlink-shm = { path = "../graphlink-shm" }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
