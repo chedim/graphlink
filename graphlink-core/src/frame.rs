@@ -11,6 +11,10 @@ pub const VERSION: u32 = 1;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target { Id(String), Prefix(String) }
 
+/// What a query selects: the entities under a prefix, or the entities of a class.
+#[derive(Clone, Debug, PartialEq)]
+pub enum QueryBy { Prefix(String), Class(String) }
+
 /// What a `val` says about its node.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ValBody { Props(J), Gone, Refused(String) }
@@ -27,6 +31,13 @@ pub enum Op {
     /// `refused: None` is `ok`
     Res { wid: String, refused: Option<String> },
     Bye { why: String },
+    /// a paged query, answered by `Page` with the same `qid`
+    Query { qid: String, by: QueryBy, after: Option<String>, limit: Option<u64> },
+    Page { qid: String, rows: Vec<J>, next: Option<String>, total: Option<u64> },
+    /// after a reconnect: the revision held per subscribed id, so the owner sends only what differs
+    Resync { have: BTreeMap<String, f64> },
+    /// the peer is hidden: the owner stops sending `val` and keeps only revisions; `Resync` wakes it
+    Pause { have: BTreeMap<String, f64> },
     /// an op this version does not know, kept as it came
     Unknown(J),
 }
@@ -64,6 +75,11 @@ fn target(m: &Map<String, J>, op: &str) -> Result<Target, String> {
         _ => Err(format!("`{op}` needs exactly one of `id` and `prefix`")),
     }
 }
+fn have(m: &Map<String, J>, op: &str) -> Result<BTreeMap<String, f64>, String> {
+    m.get("have").and_then(J::as_object).ok_or_else(|| format!("`{op}` needs `have` (an object)"))?.iter()
+        .map(|(k, v)| v.as_f64().map(|r| (k.clone(), r)).ok_or_else(|| format!("`{op}` `have` maps ids to numbers"))).collect()
+}
+fn put_have(m: &mut Map<String, J>, h: &BTreeMap<String, f64>) { m.insert("have".into(), J::Object(h.iter().map(|(k, r)| (k.clone(), json!(r))).collect())); }
 fn put_target(m: &mut Map<String, J>, t: &Target) {
     match t { Target::Id(i) => { m.insert("id".into(), json!(i)); } Target::Prefix(p) => { m.insert("prefix".into(), json!(p)); } }
 }
@@ -76,7 +92,7 @@ impl Op {
             "hello" => {
                 let support: Vec<u32> = m.get("support").and_then(J::as_array).map(|a| a.iter().filter_map(|x| x.as_u64().map(|x| x as u32)).collect()).unwrap_or_default();
                 if support.is_empty() { return Err("`hello` needs `support`, a non-empty list of versions".into()); }
-                let have = m.get("have").and_then(J::as_object).ok_or("`hello` needs `have` (an object)")?.iter().map(|(k, v)| v.as_f64().map(|r| (k.clone(), r)).ok_or_else(|| "`hello` `have` maps ids to numbers".to_string())).collect::<Result<_, _>>()?;
+                let have = have(m, name)?;
                 Op::Hello { ns: text(m, name, "ns")?, build: text(m, name, "build")?, epoch: number(m, name, "epoch")?, have, support }
             }
             "failed" => {
@@ -107,6 +123,22 @@ impl Op {
                 Op::Res { wid: text(m, name, "wid")?, refused }
             }
             "bye" => Op::Bye { why: text(m, name, "why")? },
+            "q" => {
+                let by = match (m.get("prefix").and_then(J::as_str), m.get("class").and_then(J::as_str)) {
+                    (Some(p), None) => QueryBy::Prefix(p.to_string()),
+                    (None, Some(c)) => QueryBy::Class(c.to_string()),
+                    _ => return Err("`q` needs exactly one of `prefix` and `class`".into()),
+                };
+                Op::Query { qid: text(m, name, "qid")?, by, after: m.get("after").and_then(J::as_str).map(str::to_string), limit: m.get("limit").and_then(J::as_u64) }
+            }
+            "page" => Op::Page {
+                qid: text(m, name, "qid")?,
+                rows: m.get("rows").and_then(J::as_array).cloned().ok_or("`page` needs `rows` (an array)")?,
+                next: m.get("next").and_then(J::as_str).map(str::to_string),
+                total: m.get("total").and_then(J::as_u64),
+            },
+            "resync" => Op::Resync { have: have(m, name)? },
+            "pause" => Op::Pause { have: have(m, name)? },
             _ => Op::Unknown(j.clone()),
         })
     }
@@ -117,7 +149,7 @@ impl Op {
         match self {
             Op::Hello { ns, build, epoch, have, support } => {
                 m.insert("ns".into(), json!(ns)); m.insert("build".into(), json!(build)); m.insert("epoch".into(), json!(epoch));
-                m.insert("have".into(), J::Object(have.iter().map(|(k, r)| (k.clone(), json!(r))).collect())); m.insert("support".into(), json!(support));
+                put_have(&mut m, have); m.insert("support".into(), json!(support));
                 op("hello", &mut m)
             }
             Op::Failed { support, why } => { m.insert("support".into(), json!(support)); m.insert("why".into(), json!(why)); op("failed", &mut m) }
@@ -141,6 +173,21 @@ impl Op {
                 op("res", &mut m)
             }
             Op::Bye { why } => { m.insert("why".into(), json!(why)); op("bye", &mut m) }
+            Op::Query { qid, by, after, limit } => {
+                m.insert("qid".into(), json!(qid));
+                match by { QueryBy::Prefix(p) => { m.insert("prefix".into(), json!(p)); } QueryBy::Class(c) => { m.insert("class".into(), json!(c)); } }
+                if let Some(a) = after { m.insert("after".into(), json!(a)); }
+                if let Some(l) = limit { m.insert("limit".into(), json!(l)); }
+                op("q", &mut m)
+            }
+            Op::Page { qid, rows, next, total } => {
+                m.insert("qid".into(), json!(qid)); m.insert("rows".into(), json!(rows));
+                if let Some(n) = next { m.insert("next".into(), json!(n)); }
+                if let Some(t) = total { m.insert("total".into(), json!(t)); }
+                op("page", &mut m)
+            }
+            Op::Resync { have } => { put_have(&mut m, have); op("resync", &mut m) }
+            Op::Pause { have } => { put_have(&mut m, have); op("pause", &mut m) }
             Op::Unknown(j) => j.clone(),
         }
     }

@@ -1,7 +1,7 @@
 //! Frames and version negotiation (docs/frames.md).
 use std::collections::BTreeMap;
 
-use graphlink_core::frame::{negotiate, Frame, Negotiated, Op, Target, ValBody, VERSION};
+use graphlink_core::frame::{negotiate, Frame, Negotiated, Op, QueryBy, Target, ValBody, VERSION};
 use serde_json::json;
 
 fn roundtrip(f: &Frame) -> Frame { Frame::decode(&f.encode()).expect("decodes") }
@@ -22,6 +22,12 @@ fn a_frame_with_every_op_survives_encode_then_decode() {
         Op::Res { wid: "w1".into(), refused: None },
         Op::Res { wid: "w2".into(), refused: Some("limit".into()) },
         Op::Bye { why: "done".into() },
+        Op::Query { qid: "q1".into(), by: QueryBy::Prefix("kitchen::Lamp:".into()), after: Some("kitchen::Lamp:desk".into()), limit: Some(20) },
+        Op::Query { qid: "q2".into(), by: QueryBy::Class("Lamp".into()), after: None, limit: None },
+        Op::Page { qid: "q1".into(), rows: vec![json!({"id": "kitchen::Lamp:bed"})], next: Some("kitchen::Lamp:bed".into()), total: Some(3) },
+        Op::Page { qid: "q2".into(), rows: vec![], next: None, total: None },
+        Op::Resync { have: BTreeMap::from([("kitchen::Lamp:desk".to_string(), 12.0)]) },
+        Op::Pause { have: BTreeMap::new() },
     ] };
     assert_eq!(roundtrip(&f), f);
 }
@@ -89,4 +95,26 @@ fn a_hello_is_decodable_whatever_version_it_is_written_in() {
     let f = Frame::decode(&wire).unwrap();
     assert_eq!(f.v, 9);
     assert!(matches!(&f.ops[0], Op::Hello { support, .. } if support == &vec![7, 9]));
+}
+
+#[test]
+fn the_query_pause_and_resync_ops_have_the_wire_shape_of_the_spec() {
+    let f = Frame { v: 1, n: 1, ack: 0, ops: vec![
+        Op::Query { qid: "q".into(), by: QueryBy::Class("Lamp".into()), after: None, limit: Some(5) },
+        Op::Page { qid: "q".into(), rows: vec![json!({"id": "a"})], next: None, total: Some(1) },
+        Op::Resync { have: BTreeMap::from([("e".to_string(), 2.0)]) },
+        Op::Pause { have: BTreeMap::new() },
+    ] };
+    assert_eq!(f.encode()["ops"], json!([
+        {"op": "q", "qid": "q", "class": "Lamp", "limit": 5},
+        {"op": "page", "qid": "q", "rows": [{"id": "a"}], "total": 1},
+        {"op": "resync", "have": {"e": 2.0}},
+        {"op": "pause", "have": {}},
+    ]));
+}
+
+#[test]
+fn a_query_names_a_prefix_or_a_class_never_both() {
+    assert!(Frame::decode(&json!({"v":1,"n":1,"ack":0,"ops":[{"op":"q","qid":"q"}]})).is_err());
+    assert!(Frame::decode(&json!({"v":1,"n":1,"ack":0,"ops":[{"op":"q","qid":"q","prefix":"a","class":"B"}]})).is_err());
 }
