@@ -27,9 +27,11 @@ Nothing here is published to crates.io; use it as a git dependency.
 | `is_special` | the attributes the VM provides itself, never replicated |
 | `frame::Frame`, `frame::Op` | the frame and its ops (`hello`, `failed`, `sub`, `unsub`, `val`, `read`, `wr`, `res`, `bye`, `q`, `page`, `resync`, `pause`, and `Unknown` for an op this version does not know) with `decode` and `encode` to and from JSON; the spec is `docs/frames.md` |
 | `order::Inbox`, `order::Outbox` | the counters: `Inbox::take(n)` says `Accept`, `Duplicate` or `Gap { expected }`; `Outbox::frame` numbers frames from 1 and carries the `ack`; `acked` and `unacked` keep the peer's acknowledgements |
+| `link::Link` | the state machine of one link to one peer, sans-I/O: `open`, `send`, `receive` (events for the engine: `Opened`, `Op`, `Duplicate`, `Gap`, `Failed`, `Closed`, `Refused`) |
+| `transport::Transport`, `transport::pipe` | the one edge to the outside (`send`, a non-blocking `recv`), and an in-memory pair for tests |
 | `frame::negotiate` | the highest protocol version two peers share, or the `failed` op to answer with |
 
-Not built yet (design only): the CBOR encoding, the store and transport traits, shared memory, the C interface and the language bindings. `docs/frames.md` lists the decisions that are still the operator's.
+Not built yet (design only): the CBOR encoding, the store trait (what the engine gives the library), shared memory, the C interface and the language bindings. `docs/frames.md` lists the decisions that are still the operator's.
 
 ## Using it
 

@@ -43,6 +43,12 @@ The unit of ordering is the **frame**, a JSON object (the CBOR encoding for devi
 - `ack` only moves forward and never names a frame that was not sent; an ack that does either is ignored by the sender (`Outbox::acked` says so).
 - How many frames may be unacknowledged before the sender stops (the window) is not set here: it is a number for the operator.
 
+## A link and a transport
+
+- **`Link`** is the state machine of one link to one peer, with no I/O. `open()` returns our `hello` (frame 1, written in the highest version we speak). `receive(frame)` takes a frame from the peer and returns events for the engine, and maybe a frame to send straight back. `send(ops)` returns the next frame once the link is open (our hello sent and the peer's taken); before that it is an error.
+- **Events:** `Opened` (the peer's hello and the agreed version), `Op` (an op from the peer, in order, once), `Duplicate`, `Gap`, `Failed` (no version in common, or the peer said so), `Closed` (the peer said `bye`; its `Op(Bye)` is delivered first), `Refused` (an op before the peer's hello, or a frame in a version that was not negotiated). A frame that is a duplicate or a gap delivers no ops. A closed link ignores everything.
+- **`Transport`** is the one edge that touches the outside: `send(&Frame)` queues a frame, `recv()` returns the next frame that arrived or `None`, and neither waits. The library starts no thread for it; the engine polls it at the end of a round. `pipe()` gives two connected in-memory ends (frames cross as JSON) for tests.
+
 ## Decisions (the operator's; nothing here sets them)
 
 1. The version number of the first protocol is `1`.
