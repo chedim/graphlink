@@ -40,8 +40,9 @@ fn nodes_file() -> std::path::PathBuf {
     std::fs::write(&p, json!({"kitchen::Lamp:desk": {"power": "off", "level": 3}, "hall::Door:front": {"locked": true}}).to_string()).unwrap();
     p
 }
-fn serve() -> Serve {
-    let mut child = Command::new(cli_bin()).args(["serve", "127.0.0.1:0", "--ns", "kitchen", "--nodes"]).arg(nodes_file()).stdout(Stdio::piped()).spawn()
+fn serve() -> Serve { serve_with(&[]) }
+fn serve_with(extra: &[&str]) -> Serve {
+    let mut child = Command::new(cli_bin()).args(["serve", "127.0.0.1:0", "--ns", "kitchen", "--nodes"]).arg(nodes_file()).args(extra).stdout(Stdio::piped()).spawn()
         .expect("the `graphlink` tool is not built: run `cargo test --workspace`");
     let mut line = String::new();
     BufReader::new(child.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
@@ -51,7 +52,8 @@ fn serve() -> Serve {
 /// the seat's end: the control rings and the seat's cell table made, a Link as the initiator, and the bridge's cell table to read once the bridge has made it
 struct Seat { _names: Names, name: String, ctl: Shm, _sc: Cells, link: Link, events: Vec<Event>, bridge: Option<Kill>, pc: Option<CellsReader> }
 impl Seat {
-    fn start(remote: &Serve) -> Seat {
+    fn start(remote: &Serve) -> Seat { Seat::start_with(remote, &[]) }
+    fn start_with(remote: &Serve, extra: &[&str]) -> Seat {
         let name = peer_name();
         let names = Names(name.clone());
         let mut ctl = Shm::create(format!("/gl-{name}-ctl"), 4096).unwrap();
@@ -59,12 +61,13 @@ impl Seat {
         let mut link = Link::new(Me { ns: "membrane".into(), build: "t".into(), epoch: 1.0, support: vec![VERSION], initiator: true });
         ctl.send(&link.open()).unwrap();
         let bridge = Command::new(BRIDGE)
-            .args(["connect", &remote.addr, "--peer", &name, "--slots", "64", "--key-cap", "128", "--val-cap", "1024", "--epoch", "1", "--spins", &SPINS.to_string(), "--depth", &DEPTH.to_string()])
+            .args(["connect", &remote.addr, "--peer", &name, "--slots", "64", "--key-cap", "128", "--val-cap", "1024", "--epoch", "1", "--spins", &SPINS.to_string(), "--depth", &DEPTH.to_string()]).args(extra)
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
         Seat { _names: names, name, ctl, _sc: sc, link, events: vec![], bridge: Some(Kill(bridge)), pc: None }
     }
     /// the bridge listens (loopback, an ephemeral port); returns the seat and the address it prints
-    fn start_listening() -> (Seat, String) {
+    fn start_listening() -> (Seat, String) { Seat::start_listening_with(&[]) }
+    fn start_listening_with(extra: &[&str]) -> (Seat, String) {
         let name = peer_name();
         let names = Names(name.clone());
         let mut ctl = Shm::create(format!("/gl-{name}-ctl"), 4096).unwrap();
@@ -72,7 +75,7 @@ impl Seat {
         let mut link = Link::new(Me { ns: "membrane".into(), build: "t".into(), epoch: 1.0, support: vec![VERSION], initiator: true });
         ctl.send(&link.open()).unwrap();
         let mut bridge = Command::new(BRIDGE)
-            .args(["listen", "127.0.0.1:0", "--peer", &name, "--slots", "64", "--key-cap", "128", "--val-cap", "1024", "--epoch", "1", "--spins", &SPINS.to_string(), "--depth", &DEPTH.to_string()])
+            .args(["listen", "127.0.0.1:0", "--peer", &name, "--slots", "64", "--key-cap", "128", "--val-cap", "1024", "--epoch", "1", "--spins", &SPINS.to_string(), "--depth", &DEPTH.to_string()]).args(extra)
             .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let mut line = String::new();
         BufReader::new(bridge.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
@@ -276,4 +279,77 @@ fn a_listen_address_that_is_not_loopback_is_refused_unless_it_is_asked_for() {
     let o = Command::new(BRIDGE).args(["listen", "0.0.0.0:0", "--peer", "x", "--slots", "64", "--key-cap", "128", "--val-cap", "1024", "--epoch", "1", "--spins", "1", "--depth", "1"]).stdin(Stdio::null()).output().unwrap();
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("--allow-remote"), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+// ---- tokens ------------------------------------------------------------------------------------------------------------------------------------
+
+fn secret_file() -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(format!("graphlink-bridge-secret-{}-{}", std::process::id(), unique()));
+    std::fs::write(&p, format!("{:0>64x}", (std::process::id() as u64) << 20 | unique())).unwrap();
+    p
+}
+fn token_file(secret: &std::path::Path, ns: &str) -> std::path::PathBuf {
+    let o = Command::new(cli_bin()).args(["token", "mint", "--secret-file"]).arg(secret).args(["--sub", "bridge", "--ns", ns, "--ttl", "300"]).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let p = std::env::temp_dir().join(format!("graphlink-bridge-token-{}-{}", std::process::id(), unique()));
+    std::fs::write(&p, String::from_utf8_lossy(&o.stdout).trim()).unwrap();
+    p
+}
+
+#[test]
+fn the_bridge_puts_the_token_it_was_given_in_its_hello_to_the_seat() {
+    let remote = serve();
+    let secret = secret_file();
+    let tf = token_file(&secret, "kitchen");
+    let want = std::fs::read_to_string(&tf).unwrap();
+    let mut seat = Seat::start_with(&remote, &["--token-file", tf.to_str().unwrap()]);
+    assert!(seat.until(10000, opened), "{}", seat.stderr());
+    // the seat sees, in the hello the bridge sent, the token (the bridge says the remote's namespace to the seat)
+    let seen = seat.events.iter().find_map(|e| if let Event::Opened { peer_token, .. } = e { peer_token.clone() } else { None });
+    assert_eq!(seen.as_deref(), Some(want.trim()));
+}
+
+#[test]
+fn a_remote_that_wants_a_token_gets_the_bridges_remote_token_which_names_the_seats_namespace() {
+    let secret = secret_file();
+    let remote = serve_with(&["--secret-file", secret.to_str().unwrap()]);   // the remote checks every hello
+    let mut without = Seat::start(&remote);
+    assert!(without.until(10000, |s| s.ctl.is_closed() || s.events.iter().any(|e| matches!(e, Event::Closed { .. }))) || !without.until(1000, opened), "the bridge went on without a token");
+    // the bridge says the SEAT's namespace to the remote, so the token names it
+    let tf = token_file(&secret, "membrane");
+    let mut seat = Seat::start_with(&remote, &["--remote-token-file", tf.to_str().unwrap()]);
+    assert!(seat.until(10000, opened), "{}", seat.stderr());
+    seat.send(vec![Op::Sub { target: Target::Id("kitchen::Lamp:desk".into()), props: Some(vec!["power".into()]), limit: None }]);
+    assert!(seat.until(10000, |s| s.cell(&key("kitchen::Lamp:desk", "power")).is_some()), "{}", seat.stderr());
+}
+
+#[test]
+fn a_listening_bridge_with_a_secret_refuses_a_remote_without_a_token_and_goes_on_listening() {
+    let secret = secret_file();
+    let (mut seat, addr) = Seat::start_listening_with(&["--secret-file", secret.to_str().unwrap()]);
+    let o = Command::new(cli_bin()).args(["write", &addr, "membrane::Lamp:1", "power", "\"on\""]).stdout(Stdio::piped()).output().unwrap();
+    assert!(String::from_utf8_lossy(&o.stdout).contains("refused: auth"), "{}", String::from_utf8_lossy(&o.stdout));
+    assert!(!seat.ops().iter().any(|o| matches!(o, Op::Wr { .. })));
+    // a token for another namespace than the hello's is refused the same way
+    let wrong = token_file(&secret, "hall");
+    let o = Command::new(cli_bin()).args(["write", &addr, "membrane::Lamp:1", "power", "\"on\"", "--ns", "garage", "--token-file", wrong.to_str().unwrap()]).stdout(Stdio::piped()).output().unwrap();
+    assert!(String::from_utf8_lossy(&o.stdout).contains("refused: auth"));
+    // the seat's own namespace is never granted to a remote
+    let mine = token_file(&secret, "membrane");
+    let o = Command::new(cli_bin()).args(["write", &addr, "membrane::Lamp:1", "power", "\"on\"", "--ns", "membrane", "--token-file", mine.to_str().unwrap()]).stdout(Stdio::piped()).output().unwrap();
+    assert!(String::from_utf8_lossy(&o.stdout).contains("refused: auth"));
+    // and the right one is served: the bridge was still listening
+    let good = token_file(&secret, "garage");
+    let out = Command::new(cli_bin()).args(["write", &addr, "membrane::Lamp:1", "power", "\"on\"", "--ns", "garage", "--token-file", good.to_str().unwrap()]).stdout(Stdio::piped()).spawn().unwrap();
+    assert!(seat.until(10000, |s| s.ops().iter().any(|o| matches!(o, Op::Wr { .. }))), "{}", seat.stderr());
+    let wid = seat.ops().iter().find_map(|o| if let Op::Wr { wid, .. } = o { Some(wid.clone()) } else { None }).unwrap();
+    seat.send(vec![Op::Res { wid, refused: None }]);
+    assert_eq!(String::from_utf8_lossy(&out.wait_with_output().unwrap().stdout).trim(), "ok");
+}
+
+#[test]
+fn a_bridge_open_beyond_loopback_must_check_tokens() {
+    let o = Command::new(BRIDGE).args(["listen", "0.0.0.0:0", "--allow-remote", "--peer", "x", "--slots", "64", "--key-cap", "128", "--val-cap", "1024", "--epoch", "1", "--spins", "1", "--depth", "1"]).stdin(Stdio::null()).output().unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--secret-file"), "{}", String::from_utf8_lossy(&o.stderr));
 }
