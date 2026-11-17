@@ -119,7 +119,8 @@ impl Published {
 /// what the remote said: a value of a node of its namespace becomes cells; a receipt and a page (its rows of its namespace only) go to the seat; the end of the link ends the bridge
 fn from_remote(events: Vec<Event>, remote_ns: &str, seat_ns: &str, table: &mut Published, subs: &mut Subs, to_seat: &mut Vec<Op>, to_remote: &mut Vec<Op>) -> bool {
     let mine = |id: &str| id.split_once("::").map_or(false, |(n, _)| n == remote_ns);
-    let seats = |id: &str| id.split_once("::").map_or(false, |(n, _)| n == seat_ns);
+    // a node of the seat has the seat's namespace or none at all (a seat names its own nodes bare: `Lamp:desk`)
+    let seats = |id: &str| id.split_once("::").map_or(true, |(n, _)| n == seat_ns);
     let mut end = false;
     for ev in events {
         match ev {
