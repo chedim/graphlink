@@ -6,7 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use graphlink_core::frame::{Op, QueryBy, Target, VERSION};
+use graphlink_core::frame::{Frame, Op, QueryBy, Target, VERSION};
 use graphlink_core::link::{Event, Link, Me};
 use graphlink_core::transport::Transport;
 use graphlink_shm::cells::{Cells, CellState, CellsReader};
@@ -473,4 +473,61 @@ fn a_bridge_told_to_die_with_its_parent_ends_when_its_parent_is_gone() {
     let still = alive(pid);
     if still { let _ = Command::new("kill").arg(pid.to_string()).status(); }
     assert!(!still, "the orphaned bridge is still running");
+}
+
+// ---- a seat's name on the wire: two seats are both `membrane`, so each bridge says what its seat is called across the link --------------------------
+
+#[test]
+fn with_a_seat_name_the_bridge_says_it_to_the_remote_and_the_remote_reads_the_seats_nodes_under_it() {
+    let (mut seat, addr) = Seat::start_listening_with(&["--seat-name", "rosie"]);
+    // a bare remote: it sees the seat's hello (the name, not `membrane`) and subscribes to a node under the name
+    let mut tcp = graphlink_net::Tcp::connect(addr.as_str()).unwrap();
+    let mut link = Link::new(Me { ns: "memo".into(), build: "t".into(), epoch: 1.0, support: vec![VERSION], initiator: true });
+    tcp.send(&link.open()).unwrap();
+    let mut events: Vec<Event> = vec![];
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end && !events.iter().any(|e| matches!(e, Event::Opened { .. })) {
+        if let Ok(Some(f)) = tcp.recv() { let (ev, reply) = link.receive(f); events.extend(ev); if let Some(r) = reply { tcp.send(&r).unwrap(); } }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let said = events.iter().find_map(|e| if let Event::Opened { peer_ns, .. } = e { Some(peer_ns.clone()) } else { None });
+    assert_eq!(said.as_deref(), Some("rosie"), "the bridge says the seat's name across the link");
+    tcp.send(&link.send(vec![Op::Sub { target: Target::Id("rosie::Lamp:desk".into()), props: Some(vec!["power".into()]), limit: None }, Op::Sub { target: Target::Id("hall::Door:1".into()), props: None, limit: None }]).unwrap()).unwrap();
+    // the seat is asked for its own (bare) id; the foreign one is not passed on
+    assert!(seat.until(10000, |s| s.ops().iter().any(|o| matches!(o, Op::Sub { target: Target::Id(i), .. } if i == "Lamp:desk"))), "the seat was never asked for its bare id: {:?}", seat.ops());
+    assert!(!seat.ops().iter().any(|o| matches!(o, Op::Sub { target: Target::Id(i), .. } if i.contains("Door"))));
+    // the seat answers with cells under its bare id; the remote gets the value under the name
+    seat._sc.put("Lamp:desk\u{1}", 1.0, &json!(true)).unwrap();
+    seat._sc.put("Lamp:desk\u{1}power", 1.0, &json!("off")).unwrap();
+    let mut got: Option<Frame> = None;
+    let end = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < end && got.is_none() {
+        if let Ok(Some(f)) = tcp.recv() {
+            let (ev, reply) = link.receive(f);
+            if let Some(r) = reply { tcp.send(&r).unwrap(); }
+            for e in ev { if let Event::Op(Op::Val { id, body: graphlink_core::frame::ValBody::Props(p), .. }) = e { if p["power"] == json!("off") { got = Some(Frame { v: 1, n: 0, ack: 0, ops: vec![Op::Val { id, r: 0.0, rid: None, body: graphlink_core::frame::ValBody::Props(p) }] }); } } }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let Some(Frame { ops, .. }) = got else { panic!("the remote never got the value: {}", seat.stderr()) };
+    assert!(matches!(&ops[0], Op::Val { id, .. } if id == "rosie::Lamp:desk"), "{ops:?}");
+}
+
+#[test]
+fn with_a_seat_name_a_remote_write_under_the_name_reaches_the_seat_as_a_bare_id() {
+    let (mut seat, addr) = Seat::start_listening_with(&["--seat-name", "rosie"]);
+    let out = Command::new(cli_bin()).args(["write", &addr, "rosie::Lamp:desk", "power", "\"on\""]).stdout(Stdio::piped()).spawn().unwrap();
+    assert!(seat.until(10000, |s| s.ops().iter().any(|o| matches!(o, Op::Wr { id, .. } if id == "Lamp:desk"))), "{:?}", seat.ops());
+    let wid = seat.ops().iter().find_map(|o| if let Op::Wr { wid, .. } = o { Some(wid.clone()) } else { None }).unwrap();
+    seat.send(vec![Op::Res { wid, refused: None }]);
+    assert_eq!(String::from_utf8_lossy(&out.wait_with_output().unwrap().stdout).trim(), "ok");
+}
+
+#[test]
+fn with_a_seat_name_a_bare_id_from_the_remote_is_refused() {
+    let (seat, addr) = Seat::start_listening_with(&["--seat-name", "rosie"]);
+    // a bare id is not the seat's: the seat is `rosie` across the link
+    let o = Command::new(cli_bin()).args(["write", &addr, "Lamp:desk", "power", "\"on\""]).stdout(Stdio::piped()).output().unwrap();
+    assert!(String::from_utf8_lossy(&o.stdout).starts_with("refused:"), "{}", String::from_utf8_lossy(&o.stdout));
+    assert!(!seat.ops().iter().any(|o| matches!(o, Op::Wr { .. })));
 }

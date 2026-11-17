@@ -3,6 +3,7 @@
 //!
 //!   graphlink-bridge connect <addr> --peer <name> --slots <n> --key-cap <n> --val-cap <n> --epoch <n> --spins <n> --depth <n>
 //!   (`--die-with-parent`: end when the process that started the bridge is gone (the process named by the environment variable GRAPHLINK_PARENT, else the one that started it), so a seat that supervises its bridge never leaves one behind)
+//!   (`--seat-name <name>`: what the seat is called across the link, for two seats that are both `membrane`: said in the hello to the remote, put before the seat's ids going out and required on the ids coming in)
 //!   (optional: --token-file <f> the token the seat minted for this peer, put in the hello to the seat; --remote-token-file <f> the token the remote asks for, put in the hello to the remote;
 //!    --secret-file <f> check every remote hello: its token must verify and name the remote's namespace; required with --allow-remote)
 //!   (TLS: `listen --tls-dir <dir> [--tls-san <name>]...` speaks TLS with a self-signed certificate made in <dir> at the first run (its names: the address, `localhost` when it is loopback, and the --tls-san ones);
@@ -38,7 +39,7 @@ fn usage(msg: &str) -> ! {
     exit(2)
 }
 
-struct Config { tls_dir: Option<String>, tls_cert: Option<String>, tls_name: Option<String>, sans: Vec<String>, token_file: Option<String>, remote_token_file: Option<String>, secret_file: Option<String>, listen: bool, addr: String, peer: String, slots: u64, key_cap: u32, val_cap: u32, epoch: u64, spins: u64, depth: usize }
+struct Config { seat_name: Option<String>, tls_dir: Option<String>, tls_cert: Option<String>, tls_name: Option<String>, sans: Vec<String>, token_file: Option<String>, remote_token_file: Option<String>, secret_file: Option<String>, listen: bool, addr: String, peer: String, slots: u64, key_cap: u32, val_cap: u32, epoch: u64, spins: u64, depth: usize }
 
 fn parse(args: &[String]) -> Config {
     let listen = match args.first().map(String::as_str) { Some("connect") => false, Some("listen") => true, _ => usage("the command is `connect` or `listen`") };
@@ -54,7 +55,7 @@ fn parse(args: &[String]) -> Config {
             let parent = std::env::var("GRAPHLINK_PARENT").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or_else(std::os::unix::process::parent_id);
             PARENT.store(parent, std::sync::atomic::Ordering::Relaxed); i += 1; continue; }
         if args[i] == "--tls-san" { sans.push(args.get(i + 1).unwrap_or_else(|| usage("--tls-san needs a value")).clone()); i += 2; continue; }
-        if let Some(o) = ["--token-file", "--remote-token-file", "--secret-file", "--tls-dir", "--tls-cert", "--tls-name"].iter().find(|o| **o == args[i]) {
+        if let Some(o) = ["--token-file", "--remote-token-file", "--secret-file", "--tls-dir", "--tls-cert", "--tls-name", "--seat-name"].iter().find(|o| **o == args[i]) {
             optional.insert(o, args.get(i + 1).unwrap_or_else(|| usage(&format!("{o} needs a value"))).clone());
             i += 2;
             continue;
@@ -74,7 +75,7 @@ fn parse(args: &[String]) -> Config {
     if allow_remote && !optional.contains_key("--secret-file") { usage("--allow-remote needs --secret-file: a bridge open beyond loopback must check every remote's token"); }
     if listen && (optional.contains_key("--tls-cert") || optional.contains_key("--tls-name")) { usage("--tls-cert and --tls-name are for `connect`; a listening bridge has --tls-dir"); }
     if !listen && (optional.contains_key("--tls-dir") || !sans.is_empty()) { usage("--tls-dir and --tls-san are for `listen`; a connecting bridge has --tls-cert"); }
-    Config { tls_dir: optional.get("--tls-dir").cloned(), tls_cert: optional.get("--tls-cert").cloned(), tls_name: optional.get("--tls-name").cloned(), sans, token_file: optional.get("--token-file").cloned(), remote_token_file: optional.get("--remote-token-file").cloned(), secret_file: optional.get("--secret-file").cloned(), listen, addr, peer: given["--peer"].clone(), slots: num(&given, "--slots"), key_cap: num(&given, "--key-cap"), val_cap: num(&given, "--val-cap"), epoch: num(&given, "--epoch"), spins: num(&given, "--spins"), depth: num(&given, "--depth") }
+    Config { seat_name: optional.get("--seat-name").cloned(), tls_dir: optional.get("--tls-dir").cloned(), tls_cert: optional.get("--tls-cert").cloned(), tls_name: optional.get("--tls-name").cloned(), sans, token_file: optional.get("--token-file").cloned(), remote_token_file: optional.get("--remote-token-file").cloned(), secret_file: optional.get("--secret-file").cloned(), listen, addr, peer: given["--peer"].clone(), slots: num(&given, "--slots"), key_cap: num(&given, "--key-cap"), val_cap: num(&given, "--val-cap"), epoch: num(&given, "--epoch"), spins: num(&given, "--spins"), depth: num(&given, "--depth") }
 }
 
 fn fail(msg: &str) -> ! { eprintln!("graphlink-bridge: {msg}"); exit(1) }
@@ -128,25 +129,54 @@ impl Published {
     }
 }
 
+/// The seat's name on the wire. Without `--seat-name` it is the namespace the seat said in its hello and the seat's own ids go over as they are (bare, or under that namespace). With it, the seat is
+/// called `name` across the link (two seats are both `membrane`: each bridge says what its seat is called): an id of the seat goes out as `<name>::<id>` and only an id under `<name>::` is taken
+/// from the remote (the prefix is taken off); a bare id from the remote is not the seat's.
+struct Wire { name: String, named: bool }
+
+impl Wire {
+    /// an id as the remote says it -> the seat's own id, or `None` when it is not a node of the seat
+    fn inward(&self, id: &str) -> Option<String> {
+        if self.named { id.strip_prefix(&format!("{}::", self.name)).map(str::to_string) }
+        else if id.split_once("::").map_or(true, |(n, _)| n == self.name) { Some(id.to_string()) } else { None }
+    }
+    fn inward_target(&self, t: &Target) -> Option<Target> {
+        match t {
+            Target::Id(i) => self.inward(i).map(Target::Id),
+            Target::Prefix(p) if !self.named => Some(Target::Prefix(p.clone())),
+            Target::Prefix(p) => {
+                let me = format!("{}::", self.name);
+                if let Some(rest) = p.strip_prefix(&me) { Some(Target::Prefix(rest.to_string())) }
+                else if me.starts_with(p.as_str()) { Some(Target::Prefix(String::new())) }   // a prefix of the name covers all of the seat
+                else { None }
+            }
+        }
+    }
+    /// a node of the seat -> its id on the wire
+    fn outward(&self, id: &str) -> String { if self.named { format!("{}::{id}", self.name) } else { id.to_string() } }
+}
+
 /// what the remote said: a value of a node of its namespace becomes cells; a receipt and a page (its rows of its namespace only) go to the seat; the end of the link ends the bridge
-fn from_remote(events: Vec<Event>, remote_ns: &str, seat_ns: &str, table: &mut Published, subs: &mut Subs, to_seat: &mut Vec<Op>, to_remote: &mut Vec<Op>) -> bool {
+fn from_remote(events: Vec<Event>, remote_ns: &str, wire: &Wire, table: &mut Published, subs: &mut Subs, to_seat: &mut Vec<Op>, to_remote: &mut Vec<Op>) -> bool {
     let mine = |id: &str| id.split_once("::").map_or(false, |(n, _)| n == remote_ns);
-    // a node of the seat has the seat's namespace or none at all (a seat names its own nodes bare: `Lamp:desk`)
-    let seats = |id: &str| id.split_once("::").map_or(true, |(n, _)| n == seat_ns);
     let mut end = false;
     for ev in events {
         match ev {
-            // the remote reads the seat: only nodes of the seat's namespace go to the seat
+            // the remote reads the seat: only nodes of the seat go to the seat
             Event::Op(Op::Sub { target, props, limit }) => {
-                if matches!(&target, Target::Id(i) if !seats(i)) { continue; }
+                let Some(target) = wire.inward_target(&target) else { continue };
                 subs.add(target.clone(), props.clone());
                 to_seat.push(Op::Sub { target, props, limit });
             }
-            Event::Op(Op::Unsub { target }) => { subs.remove(&target); to_seat.push(Op::Unsub { target }); }
-            Event::Op(Op::Wr { wid, id, prop, value }) => {
-                if seats(&id) { to_seat.push(Op::Wr { wid, id, prop, value }); }
-                else { to_remote.push(Op::Res { wid, refused: Some(format!("not a node of {seat_ns}: {id}")) }); }
+            Event::Op(Op::Unsub { target }) => {
+                let Some(target) = wire.inward_target(&target) else { continue };
+                subs.remove(&target);
+                to_seat.push(Op::Unsub { target });
             }
+            Event::Op(Op::Wr { wid, id, prop, value }) => match wire.inward(&id) {
+                Some(id) => to_seat.push(Op::Wr { wid, id, prop, value }),
+                None => to_remote.push(Op::Res { wid, refused: Some(format!("not a node of {}: {id}", wire.name)) }),
+            },
             Event::Op(Op::Val { id, r, body, .. }) => { if mine(&id) { table.val(&id, r, body); } }
             Event::Op(Op::Res { wid, refused }) => to_seat.push(Op::Res { wid, refused }),
             Event::Op(Op::Page { qid, rows, next, total }) => {
@@ -179,7 +209,7 @@ impl Subs {
     }
 
     /// the seat's cells for what the remote subscribed to: a `val` for each node with a cell newer than the last one sent, `gone` (or `refused`) once for a node that is not live
-    fn relay(&mut self, reader: &CellsReader, spins: u64, depth: usize, out: &mut Vec<Op>) {
+    fn relay(&mut self, reader: &CellsReader, spins: u64, depth: usize, wire: &Wire, out: &mut Vec<Op>) {
         let mut ids: BTreeSet<String> = BTreeSet::new();
         for (t, _) in &self.list {
             match t {
@@ -192,7 +222,7 @@ impl Subs {
                 Ok(Some(c)) if c.state != CellState::Live => {
                     if self.down.insert(id.clone()) {
                         let body = if c.state == CellState::Gone { ValBody::Gone } else { ValBody::Refused(c.value.as_str().unwrap_or("refused").to_string()) };
-                        out.push(Op::Val { id, r: c.rev, rid: None, body });
+                        out.push(Op::Val { id: wire.outward(&id), r: c.rev, rid: None, body });
                     }
                     continue;
                 }
@@ -210,7 +240,7 @@ impl Subs {
                 if prop.is_empty() || c.state != CellState::Live || !(all || wanted.iter().any(|w| w.as_str() == prop)) { continue; }
                 if self.sent.get(&key).map_or(true, |r| c.rev > *r) { self.sent.insert(key, c.rev); rev = rev.max(c.rev); props.insert(prop.to_string(), c.value); }
             }
-            if !props.is_empty() { out.push(Op::Val { id, r: rev, rid: None, body: ValBody::Props(J::Object(props)) }); }
+            if !props.is_empty() { out.push(Op::Val { id: wire.outward(&id), r: rev, rid: None, body: ValBody::Props(J::Object(props)) }); }
         }
     }
 }
@@ -225,6 +255,8 @@ pub fn run() {
         match ctl.recv() { Ok(Some(f)) => break f, Ok(None) => { if ctl.is_closed() { exit(0); } nap(); } Err(e) => fail(&format!("the seat's rings: {e}")) }
     };
     let seat_ns = seat_hello.ops.iter().find_map(|o| if let Op::Hello { ns, .. } = o { Some(ns.clone()) } else { None }).unwrap_or_else(|| fail("the seat's first frame is not a hello"));
+    // what the seat is called across the link
+    let wire = Wire { name: cfg.seat_name.clone().unwrap_or_else(|| seat_ns.clone()), named: cfg.seat_name.is_some() };
     let read = |path: &str| std::fs::read_to_string(path).unwrap_or_else(|e| fail(&format!("cannot read {path}: {e}"))).trim().to_string();
     let secret: Option<Vec<u8>> = cfg.secret_file.as_deref().map(|p| read(p).into_bytes());
     let remote_token: Option<String> = cfg.remote_token_file.as_deref().map(read);
@@ -258,7 +290,7 @@ pub fn run() {
             }.unwrap_or_else(|e| fail(&format!("cannot connect to {}: {e}", cfg.addr))),
         };
         // say the seat's namespace (and the token the owner gave for the remote), learn the remote's
-        let mut link = Link::new(me(&seat_ns, !cfg.listen));
+        let mut link = Link::new(me(&wire.name, !cfg.listen));
         if let Some(t) = &remote_token { link = link.with_token(t.clone()); }
         let _ = tcp.send(&link.open());
         let mut early: Vec<Event> = vec![];
@@ -273,7 +305,7 @@ pub fn run() {
                     if let Some((ns, token)) = opened {
                         // with a secret the remote's hello must carry a token that verifies and names the hello's namespace (the seat's own is never granted)
                         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
-                        match secret.as_deref().map(|s| check_hello(token.as_deref(), &ns, &[seat_ns.as_str()], s, now)) {
+                        match secret.as_deref().map(|s| check_hello(token.as_deref(), &ns, &[wire.name.as_str()], s, now)) {
                             Some(Err(why)) => { if let Ok(f) = link.send(vec![Op::Bye { why: "refused: auth".into() }]) { let _ = tcp.send(&f); } break Err(format!("hello of {ns:?} refused: {why}")); }
                             _ => break Ok(ns),
                         }
@@ -305,7 +337,7 @@ pub fn run() {
     let mut to_remote: Vec<Op> = vec![];
     let mut to_seat: Vec<Op> = vec![];
     let mut done = events.iter().any(|e| matches!(e, Event::Failed { .. } | Event::Closed { .. }));
-    if from_remote(early, &remote_ns, &seat_ns, &mut table, &mut subs, &mut to_seat, &mut to_remote) { done = true; }
+    if from_remote(early, &remote_ns, &wire, &mut table, &mut subs, &mut to_seat, &mut to_remote) { done = true; }
 
     while !done {
         // what the seat asks
@@ -330,10 +362,10 @@ pub fn run() {
         while let Ok(Some(f)) = tcp.recv() {
             let (events, reply) = remote.receive(f);
             if let Some(r) = reply { let _ = tcp.send(&r); }
-            if from_remote(events, &remote_ns, &seat_ns, &mut table, &mut subs, &mut to_seat, &mut to_remote) { done = true; }
+            if from_remote(events, &remote_ns, &wire, &mut table, &mut subs, &mut to_seat, &mut to_remote) { done = true; }
         }
         if tcp.is_closed() { done = true; }
-        subs.relay(&reader, cfg.spins, cfg.depth, &mut to_remote);
+        subs.relay(&reader, cfg.spins, cfg.depth, &wire, &mut to_remote);
         if !to_remote.is_empty() { if let Ok(f) = remote.send(std::mem::take(&mut to_remote)) { let _ = tcp.send(&f); } }
         if !to_seat.is_empty() { if let Ok(f) = seat.send(std::mem::take(&mut to_seat)) { let _ = ctl.send(&f); } }
         if !done { nap(); }
