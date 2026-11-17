@@ -2,6 +2,7 @@
 //! cell table a seat makes for a declared peer), and what the bridge says about itself is the remote's own namespace.
 //!
 //!   graphlink-bridge connect <addr> --peer <name> --slots <n> --key-cap <n> --val-cap <n> --epoch <n> --spins <n> --depth <n>
+//!   (`--die-with-parent`: end when the process that started the bridge is gone (the process named by the environment variable GRAPHLINK_PARENT, else the one that started it), so a seat that supervises its bridge never leaves one behind)
 //!   (optional: --token-file <f> the token the seat minted for this peer, put in the hello to the seat; --remote-token-file <f> the token the remote asks for, put in the hello to the remote;
 //!    --secret-file <f> check every remote hello: its token must verify and name the remote's namespace; required with --allow-remote)
 //!   (TLS: `listen --tls-dir <dir> [--tls-san <name>]...` speaks TLS with a self-signed certificate made in <dir> at the first run (its names: the address, `localhost` when it is loopback, and the --tls-san ones);
@@ -49,6 +50,9 @@ fn parse(args: &[String]) -> Config {
     let mut i = 2;
     while i < args.len() {
         if listen && args[i] == "--allow-remote" { allow_remote = true; i += 1; continue; }
+        if args[i] == "--die-with-parent" { // the supervising process names itself in GRAPHLINK_PARENT (no race with its own death right after it starts the bridge); otherwise the parent now
+            let parent = std::env::var("GRAPHLINK_PARENT").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or_else(std::os::unix::process::parent_id);
+            PARENT.store(parent, std::sync::atomic::Ordering::Relaxed); i += 1; continue; }
         if args[i] == "--tls-san" { sans.push(args.get(i + 1).unwrap_or_else(|| usage("--tls-san needs a value")).clone()); i += 2; continue; }
         if let Some(o) = ["--token-file", "--remote-token-file", "--secret-file", "--tls-dir", "--tls-cert", "--tls-name"].iter().find(|o| **o == args[i]) {
             optional.insert(o, args.get(i + 1).unwrap_or_else(|| usage(&format!("{o} needs a value"))).clone());
@@ -80,7 +84,15 @@ fn me(ns: &str, initiator: bool) -> Me {
     Me { ns: ns.into(), build: format!("graphlink-bridge {}", env!("CARGO_PKG_VERSION")), epoch, support: vec![VERSION], initiator }
 }
 
-fn nap() { std::thread::sleep(Duration::from_millis(5)); }
+/// the process that started the bridge, when it was told to die with it (`--die-with-parent`); 0 = not told
+static PARENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// a pause between polls; a bridge told to die with its parent ends here, once the parent is gone (a process whose parent ends is handed to another: its parent id changes)
+fn nap() {
+    let want = PARENT.load(std::sync::atomic::Ordering::Relaxed);
+    if want != 0 && std::os::unix::process::parent_id() != want { exit(0); }
+    std::thread::sleep(Duration::from_millis(5));
+}
 
 /// the remote's cell table as the seat reads it: one cell per prop and one for the node (`<id>` U+0001 `<prop>`, the node's own with an empty prop)
 struct Published { cells: Cells, last: BTreeMap<String, (f64, J, CellState)> }
@@ -279,6 +291,8 @@ pub fn run() {
     };
 
     // toward the seat: the remote's table, then the answer to the seat's hello in the remote's name
+    // this name is the bridge's own: what a bridge that was killed left under it is removed first
+    graphlink_shm::remove_region(&format!("/gl-{}-pc", cfg.peer)).unwrap_or_else(|e| fail(&format!("cannot clear the old cell table: {e}")));
     let cells = Cells::create(format!("/gl-{}-pc", cfg.peer), cfg.slots, cfg.key_cap, cfg.val_cap, cfg.epoch).unwrap_or_else(|e| fail(&format!("cannot make the cell table: {e}")));
     let mut table = Published { cells, last: BTreeMap::new() };
     let reader = CellsReader::attach(format!("/gl-{}-sc", cfg.peer)).unwrap_or_else(|e| fail(&format!("cannot attach the seat's cell table: {e}")));
