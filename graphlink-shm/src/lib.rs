@@ -4,6 +4,8 @@
 //! the two `mmap` and `munmap` calls of the C library, declared here (Unix only). Every length read from the region is untrusted: it is checked before it is used.
 #![cfg(unix)]
 
+pub mod cells;
+
 use std::fs::{File, OpenOptions};
 use std::os::raw::{c_int, c_void};
 use std::os::unix::io::AsRawFd;
@@ -51,8 +53,15 @@ unsafe impl Send for Shm {}
 
 fn region_len(ring: usize) -> usize { HEADER + 2 * (RING_DATA + ring) }
 
-fn map(file: &File, len: usize) -> Result<*mut u8, String> {
-    let p = unsafe { mmap(std::ptr::null_mut(), len, PROT_READ | PROT_WRITE, MAP_SHARED, file.as_raw_fd(), 0) };
+pub(crate) fn map(file: &File, len: usize) -> Result<*mut u8, String> { map_with(file, len, PROT_READ | PROT_WRITE) }
+
+/// a mapping that cannot be written through: a reader's view of a region it does not own
+pub(crate) fn map_read_only(file: &File, len: usize) -> Result<*mut u8, String> { map_with(file, len, PROT_READ) }
+
+pub(crate) fn unmap(p: *mut u8, len: usize) { unsafe { munmap(p as *mut c_void, len); } }
+
+fn map_with(file: &File, len: usize, prot: c_int) -> Result<*mut u8, String> {
+    let p = unsafe { mmap(std::ptr::null_mut(), len, prot, MAP_SHARED, file.as_raw_fd(), 0) };
     if p as isize == -1 || p.is_null() { return Err(format!("cannot map {len} bytes: {}", std::io::Error::last_os_error())); }
     Ok(p as *mut u8)
 }
