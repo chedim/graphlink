@@ -1,6 +1,8 @@
-# Shared memory: a table of cells holding CBOR values (DESIGN, not built)
+# Shared memory: a table of cells holding CBOR values (the control rings are built in `graphlink-shm`; the cell table is design)
 
 Status: **design. Nothing here is built.** Decided by the operator: values in shared memory are CBOR items, in a table with one slot per cell. Every size, limit and number below is a DECISION for the operator and is marked as one; none is set.
+
+**Built so far (`graphlink-shm`, a `Transport`):** the control ring side only. The region is a file both processes map: a 128-byte header (magic, layout version 1, ring size, a closed flag per end), then two single-producer rings, one per direction. A frame is a 4-byte length and its JSON bytes, wrapping around the ring's end; `recv` never waits; a sender whose ring is full queues the rest locally and writes it as the reader makes room; every length read from the region is checked, and a corrupt ring closes the link with an error. The creator removes the file when it goes. Not built: the cell table and arena (this page's sections 2 to 4), CBOR frames, and a heartbeat for an end that dies without dropping (the closed flag is set only on a clean drop).
 
 ## 1. Why this and not frames
 
