@@ -19,9 +19,9 @@ fn usage(msg: &str) -> ! {
     exit(2)
 }
 
-fn me(ns: &str) -> Me {
+fn me(ns: &str, initiator: bool) -> Me {
     let epoch = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
-    Me { ns: ns.into(), build: format!("graphlink-cli {}", env!("CARGO_PKG_VERSION")), epoch, support: vec![VERSION] }
+    Me { ns: ns.into(), build: format!("graphlink-cli {}", env!("CARGO_PKG_VERSION")), epoch, support: vec![VERSION], initiator }
 }
 
 fn main() {
@@ -71,7 +71,7 @@ fn serve(args: &[String]) {
     let mut conns: Vec<Conn> = vec![];
     loop {
         while let Ok(Some(mut tcp)) = listener.accept() {
-            let mut link = Link::new(me(ns));
+            let mut link = Link::new(me(ns, false));
             let _ = tcp.send(&link.open());
             conns.push(Conn { tcp, link, subs: vec![] });
         }
@@ -129,7 +129,7 @@ fn serve(args: &[String]) {
 
 fn connect(addr: &str) -> (Tcp, Link) {
     let mut tcp = Tcp::connect(addr).unwrap_or_else(|e| { eprintln!("cannot connect to {addr}: {e}"); exit(1) });
-    let mut link = Link::new(me("graphlink-cli"));
+    let mut link = Link::new(me("graphlink-cli", true));
     tcp.send(&link.open()).ok();
     let end = Instant::now() + Duration::from_secs(5);
     while !link.is_open() {

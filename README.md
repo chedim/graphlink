@@ -25,10 +25,10 @@ Nothing here is published to crates.io; use it as a git dependency.
 | `LINK_GRACE_S` | how long an unread subscription lives (0.5 s of engine time) |
 | `Replica`, `ReplicaState` | a foreign entity's local copy: the revision applied, the props a value arrived for, and the owner's verdict (`Live`, `Gone`, `Refused`) |
 | `is_special` | the attributes the VM provides itself, never replicated |
-| `frame::Frame`, `frame::Op` | the frame and its ops (`hello`, `failed`, `sub`, `unsub`, `val`, `read`, `wr`, `res`, `bye`, `q`, `page`, `resync`, `pause`, and `Unknown` for an op this version does not know) with `decode` and `encode` to and from JSON; the spec is `docs/frames.md` |
+| `frame::Frame`, `frame::Op` | the frame and its ops (`hello`, `failed`, `sub`, `unsub`, `val`, `read`, `wr`, `res`, `bye`, `q`, `page`, `resync`, `pause`, `upgrade`, `upgraded`, `upgrade_refused`, and `Unknown` for an op this version does not know) with `decode` and `encode` to and from JSON; the spec is `docs/frames.md` |
 | `cbor::encode`, `cbor::decode` | the CBOR subset JSON can hold: shortest integers, 64-bit floats, text, arrays, maps in insertion order; `decode` refuses tags, byte strings, indefinite lengths, NaN, duplicate keys and nesting past a limit it is given |
 | `order::Inbox`, `order::Outbox` | the counters: `Inbox::take(n)` says `Accept`, `Duplicate` or `Gap { expected }`; `Outbox::frame` numbers frames from 1 and carries the `ack`; `acked` and `unacked` keep the peer's acknowledgements |
-| `link::Link` | the state machine of one link to one peer, sans-I/O: `open`, `send`, `receive` (events for the engine: `Opened`, `Op`, `Duplicate`, `Gap`, `Failed`, `Closed`, `Refused`) |
+| `link::Link` | the state machine of one link to one peer, sans-I/O: `open`, `send`, `receive` (events for the engine: `Opened`, `Op`, `Duplicate`, `Gap`, `Failed`, `Closed`, `Refused`, and for an upgrade `UpgradeProposed`, `Upgraded`, `UpgradeRefused`; `propose`, `accept_upgrade`, `refuse_upgrade`) |
 | `transport::Transport`, `transport::pipe` | the one edge to the outside (`send`, a non-blocking `recv`), and an in-memory pair for tests |
 | `frame::negotiate` | the highest protocol version two peers share, or the `failed` op to answer with |
 

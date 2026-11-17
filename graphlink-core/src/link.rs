@@ -2,12 +2,13 @@
 //! means to the engine. Sans-I/O: `receive` takes a frame and returns events (and maybe a frame to send back); `open` and `send` return the frames to give a transport.
 use std::collections::BTreeMap;
 
-use crate::frame::{negotiate, Frame, Negotiated, Op, VERSION};
+use crate::frame::{negotiate, Frame, Negotiated, Op, Proposal, VERSION};
 use crate::order::{Inbox, Outbox, Take};
 
 /// What this side says about itself in its `hello`.
 #[derive(Clone, Debug)]
-pub struct Me { pub ns: String, pub build: String, pub epoch: f64, pub support: Vec<u32> }
+/// `initiator`: this side opened the connection (or made the control region): its upgrade proposal wins when both peers propose at once.
+pub struct Me { pub ns: String, pub build: String, pub epoch: f64, pub support: Vec<u32>, pub initiator: bool }
 
 /// What `receive` tells the engine.
 #[derive(Clone, Debug, PartialEq)]
@@ -24,6 +25,12 @@ pub enum Event {
     Failed { why: String },
     /// the peer said `bye`; the link is closed
     Closed { why: String },
+    /// the peer proposes moving the link; answer with `accept_upgrade` or `refuse_upgrade`
+    UpgradeProposed(Proposal),
+    /// the peer accepted our proposal: switch to it (the counters go on)
+    Upgraded(Proposal),
+    /// the peer refused our proposal: the transport we had is still the one
+    UpgradeRefused { why: String },
     /// the frame broke a rule (an op before the hello, a version that was not negotiated); it was not delivered
     Refused { why: String },
 }
@@ -31,10 +38,13 @@ pub enum Event {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum State { Idle, Opening, Open, Closed }
 
-pub struct Link { me: Me, state: State, version: u32, hello_seen: bool, inbox: Inbox, outbox: Outbox }
+#[derive(Clone, Debug, PartialEq)]
+enum Upgrade { None, Proposed(Proposal), Incoming(Proposal) }
+
+pub struct Link { me: Me, state: State, version: u32, hello_seen: bool, inbox: Inbox, outbox: Outbox, upgrade: Upgrade }
 
 impl Link {
-    pub fn new(me: Me) -> Link { Link { me, state: State::Idle, version: VERSION, hello_seen: false, inbox: Inbox::default(), outbox: Outbox::default() } }
+    pub fn new(me: Me) -> Link { Link { me, state: State::Idle, version: VERSION, hello_seen: false, inbox: Inbox::default(), outbox: Outbox::default(), upgrade: Upgrade::None } }
 
     pub fn is_open(&self) -> bool { self.state == State::Open }
 
@@ -50,7 +60,32 @@ impl Link {
     /// A frame for the peer; only once the link is open (our hello sent and theirs taken).
     pub fn send(&mut self, ops: Vec<Op>) -> Result<Frame, String> {
         if self.state != State::Open { return Err("the link is not open".into()); }
+        if matches!(self.upgrade, Upgrade::Proposed(_)) { return Err("an upgrade is pending: hold frames until the peer answers it".into()); }
         Ok(self.outbox.frame(self.version, &self.inbox, ops))
+    }
+
+    /// Propose moving the link to another transport or encoding. Until the peer answers, `send` is an error (the caller holds its frames); on `Event::Upgraded` it switches.
+    pub fn propose(&mut self, p: Proposal) -> Result<Frame, String> {
+        if self.state != State::Open { return Err("the link is not open".into()); }
+        if self.upgrade != Upgrade::None { return Err("an upgrade is already pending".into()); }
+        self.upgrade = Upgrade::Proposed(p.clone());
+        Ok(self.outbox.frame(self.version, &self.inbox, vec![Op::Upgrade(p)]))
+    }
+
+    /// Accept what the peer proposed (after `Event::UpgradeProposed`): the frame to send, and then the caller switches.
+    pub fn accept_upgrade(&mut self) -> Result<Frame, String> {
+        match std::mem::replace(&mut self.upgrade, Upgrade::None) {
+            Upgrade::Incoming(p) => Ok(self.outbox.frame(self.version, &self.inbox, vec![Op::Upgraded(p)])),
+            other => { self.upgrade = other; Err("the peer has proposed no upgrade".into()) }
+        }
+    }
+
+    /// Refuse what the peer proposed.
+    pub fn refuse_upgrade(&mut self, why: &str) -> Result<Frame, String> {
+        match std::mem::replace(&mut self.upgrade, Upgrade::None) {
+            Upgrade::Incoming(_) => Ok(self.outbox.frame(self.version, &self.inbox, vec![Op::UpgradeRefused { why: why.to_string() }])),
+            other => { self.upgrade = other; Err("the peer has proposed no upgrade".into()) }
+        }
     }
 
     /// Take a frame from the peer: the events for the engine, and a frame to send straight back (the `failed` of a version mismatch).
@@ -84,6 +119,22 @@ impl Link {
                 Op::Unknown(_) => {}
                 _ if !self.hello_seen => { events.push(Event::Refused { why: "an op before the peer's hello".into() }); break; }
                 _ if self.state == State::Open && frame.v != self.version => { events.push(Event::Refused { why: format!("a frame in version {}, the link speaks {}", frame.v, self.version) }); break; }
+                Op::Upgrade(p) => match &self.upgrade {
+                    _ if self.state != State::Open => { events.push(Event::Refused { why: "an upgrade before the link is open".into() }); break; }
+                    Upgrade::None => { self.upgrade = Upgrade::Incoming(p.clone()); events.push(Event::UpgradeProposed(p)); }
+                    // both proposed at once: the initiator's stands; the other gives up its own and is asked to answer the initiator's
+                    Upgrade::Proposed(_) if self.me.initiator => {}
+                    Upgrade::Proposed(_) => { self.upgrade = Upgrade::Incoming(p.clone()); events.push(Event::UpgradeProposed(p)); }
+                    Upgrade::Incoming(_) => { events.push(Event::Refused { why: "an upgrade while another is pending".into() }); break; }
+                },
+                Op::Upgraded(p) => match &self.upgrade {
+                    Upgrade::Proposed(q) if *q == p => { self.upgrade = Upgrade::None; events.push(Event::Upgraded(p)); }
+                    _ => { events.push(Event::Refused { why: "an upgraded nobody asked for".into() }); break; }
+                },
+                Op::UpgradeRefused { why } => match &self.upgrade {
+                    Upgrade::Proposed(_) => { self.upgrade = Upgrade::None; events.push(Event::UpgradeRefused { why }); }
+                    _ => { events.push(Event::Refused { why: "an upgrade_refused nobody asked for".into() }); break; }
+                },
                 Op::Bye { why } => { events.push(Event::Op(Op::Bye { why: why.clone() })); events.push(Event::Closed { why }); self.state = State::Closed; break; }
                 other => events.push(Event::Op(other)),
             }
