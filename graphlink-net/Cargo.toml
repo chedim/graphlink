@@ -9,3 +9,19 @@ publish = false
 [dependencies]
 graphlink-core = { path = "../graphlink-core" }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+
+[features]
+# TLS for the transport (rustls, with ring) and a maker of a small CA and a certificate for a listener (rcgen)
+tls = ["dep:rustls", "dep:rcgen"]
+
+[dependencies.rustls]
+version = "0.23"
+default-features = false
+features = ["ring", "std", "tls12"]
+optional = true
+
+[dependencies.rcgen]
+version = "0.14.10"
+default-features = false
+features = ["ring", "pem"]
+optional = true

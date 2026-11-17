@@ -3,6 +3,7 @@
 //!   graphlink serve <addr> --ns <namespace> --nodes <file.json> [--secret-file <file>]   own the nodes of the file ({id: {prop: value}}) and answer peers; with a secret a peer's hello must carry a token (below)
 //!   graphlink watch <addr> <id>  |  graphlink watch <addr> --prefix <prefix>   print each value of the nodes as one JSON line, the current one first
 //!   graphlink write <addr> <id> <prop> <json>                      write a prop of a node (prints `ok` or `refused: why`; exit 1 when refused)
+//!   serve also takes `--tls-dir <dir>` (speak TLS: a self-signed certificate is made there at the first run) and `--tls-san <name>` (more names for it); watch and write take `--tls-cert <file>` (trust exactly that certificate) and `--tls-name <name>`
 //!   graphlink token mint --secret-file <file> --sub <sub> --ns <namespace> --ttl <seconds>   print a token that lets its holder own <namespace> (the life is required: no default)
 //!   watch and write take `--token-file <file>` (the token their hello carries) and `--ns <namespace>` (what their hello says; default graphlink-cli)
 use std::collections::BTreeMap;
@@ -18,7 +19,7 @@ use graphlink_net::{Listener, Tcp};
 use serde_json::{json, Map, Value as J};
 
 fn usage(msg: &str) -> ! {
-    eprintln!("{msg}\nusage:\n  graphlink serve <addr> --ns <namespace> --nodes <file.json> [--secret-file <file>]\n  graphlink watch <addr> <id> | --prefix <prefix> [--token-file <file>] [--ns <namespace>]\n  graphlink write <addr> <id> <prop> <json> [--token-file <file>] [--ns <namespace>]\n  graphlink token mint --secret-file <file> --sub <sub> --ns <namespace> --ttl <seconds>");
+    eprintln!("{msg}\nusage:\n  graphlink serve <addr> --ns <namespace> --nodes <file.json> [--secret-file <file>] [--tls-dir <dir>] [--tls-san <name>]\n  graphlink watch <addr> <id> | --prefix <prefix> [--token-file <file>] [--ns <namespace>] [--tls-cert <file>] [--tls-name <name>]\n  graphlink write <addr> <id> <prop> <json> [--token-file <file>] [--ns <namespace>] [--tls-cert <file>] [--tls-name <name>]\n  graphlink token mint --secret-file <file> --sub <sub> --ns <namespace> --ttl <seconds>");
     exit(2)
 }
 
@@ -89,10 +90,11 @@ fn val(id: &str, node: &Node, props: Option<&Vec<String>>, rid: Option<String>) 
 
 fn serve(args: &[String]) {
     let addr = args.first().unwrap_or_else(|| usage("serve needs an address"));
-    let (mut ns, mut file, mut secret_file) = (None, None, None);
+    let (mut ns, mut file, mut secret_file, mut tls_dir) = (None, None, None, None);
+    let mut sans: Vec<String> = vec![];
     let mut i = 1;
     while i < args.len() {
-        match args[i].as_str() { "--ns" => { ns = args.get(i + 1); i += 2; } "--nodes" => { file = args.get(i + 1); i += 2; } "--secret-file" => { secret_file = args.get(i + 1); i += 2; } o => usage(&format!("unknown option {o}")) }
+        match args[i].as_str() { "--ns" => { ns = args.get(i + 1); i += 2; } "--nodes" => { file = args.get(i + 1); i += 2; } "--secret-file" => { secret_file = args.get(i + 1); i += 2; } "--tls-dir" => { tls_dir = args.get(i + 1); i += 2; } "--tls-san" => { sans.push(args.get(i + 1).unwrap_or_else(|| usage("--tls-san needs a value")).clone()); i += 2; } o => usage(&format!("unknown option {o}")) }
     }
     let ns = ns.unwrap_or_else(|| usage("serve needs --ns"));
     let file = file.unwrap_or_else(|| usage("serve needs --nodes"));
@@ -102,7 +104,13 @@ fn serve(args: &[String]) {
         .iter().map(|(id, p)| (id.clone(), Node { props: p.as_object().cloned().unwrap_or_default(), r: 1.0 })).collect();
 
     let secret: Option<Vec<u8>> = secret_file.map(|p| read_secret(p));
-    let listener = Listener::bind(addr.as_str()).unwrap_or_else(|e| { eprintln!("cannot listen on {addr}: {e}"); exit(1) });
+    let mut listener = Listener::bind(addr.as_str()).unwrap_or_else(|e| { eprintln!("cannot listen on {addr}: {e}"); exit(1) });
+    if let Some(dir) = tls_dir {
+        let dir = std::path::Path::new(dir);
+        graphlink_net::tls::make_certs(dir, &graphlink_net::tls::sans_for(listener.local_addr().unwrap().ip(), &sans)).unwrap_or_else(|e| { eprintln!("{e}"); exit(1) });
+        let server = graphlink_net::tls::TlsServer::from_files(&dir.join("cert.pem"), &dir.join("key.pem")).unwrap_or_else(|e| { eprintln!("{e}"); exit(1) });
+        listener = listener.with_tls(server);
+    }
     println!("listening {}", listener.local_addr().unwrap());
     std::io::stdout().flush().ok();
 
@@ -175,8 +183,14 @@ fn serve(args: &[String]) {
 
 // ---- the client side: connect, open, wait for the peer's hello --------------------------------------------------------------------------------
 
-fn connect(addr: &str, ns: &str, token_file: Option<&str>) -> (Tcp, Link) {
-    let mut tcp = Tcp::connect(addr).unwrap_or_else(|e| { eprintln!("cannot connect to {addr}: {e}"); exit(1) });
+fn connect(addr: &str, ns: &str, token_file: Option<&str>, tls: (Option<String>, Option<String>)) -> (Tcp, Link) {
+    let mut tcp = match tls.0 {
+        None => Tcp::connect(addr),
+        Some(cert) => {
+            let client = graphlink_net::tls::TlsClient::trusting(std::path::Path::new(&cert)).unwrap_or_else(|e| { eprintln!("{e}"); exit(1) });
+            Tcp::connect_tls(addr, tls.1.as_deref().unwrap_or(graphlink_net::tls::host_of(addr)), &client)
+        }
+    }.unwrap_or_else(|e| { eprintln!("cannot connect to {addr}: {e}"); exit(1) });
     let mut link = Link::new(me(ns, true));
     if let Some(f) = token_file { link = link.with_token(std::fs::read_to_string(f).unwrap_or_else(|e| { eprintln!("cannot read {f}: {e}"); exit(1) }).trim().to_string()); }
     tcp.send(&link.open()).ok();
@@ -199,6 +213,8 @@ fn connect(addr: &str, ns: &str, token_file: Option<&str>) -> (Tcp, Link) {
 fn watch(args: &[String]) {
     let (args, token_file) = take(args, "--token-file");
     let (args, ns) = take(&args, "--ns");
+    let (args, tls_cert) = take(&args, "--tls-cert");
+    let (args, tls_name) = take(&args, "--tls-name");
     let args = &args[..];
     let addr = args.first().unwrap_or_else(|| usage("watch needs an address"));
     let target = match (args.get(1).map(String::as_str), args.get(2)) {
@@ -206,7 +222,7 @@ fn watch(args: &[String]) {
         (Some(id), None) if !id.starts_with("--") => Target::Id(id.to_string()),
         _ => usage("watch needs an id, or --prefix <prefix>"),
     };
-    let (mut tcp, mut link) = connect(addr, ns.as_deref().unwrap_or("graphlink-cli"), token_file.as_deref());
+    let (mut tcp, mut link) = connect(addr, ns.as_deref().unwrap_or("graphlink-cli"), token_file.as_deref(), (tls_cert.clone(), tls_name.clone()));
     tcp.send(&link.send(vec![Op::Sub { target, props: None, limit: None }]).unwrap()).ok();
     loop {
         match tcp.recv() {
@@ -235,10 +251,12 @@ fn watch(args: &[String]) {
 fn write(args: &[String]) {
     let (args, token_file) = take(args, "--token-file");
     let (args, ns) = take(&args, "--ns");
+    let (args, tls_cert) = take(&args, "--tls-cert");
+    let (args, tls_name) = take(&args, "--tls-name");
     let args = &args[..];
     if args.len() != 4 { usage("write needs <addr> <id> <prop> <json>"); }
     let value: J = serde_json::from_str(&args[3]).unwrap_or_else(|e| usage(&format!("the value is not JSON: {e}")));
-    let (mut tcp, mut link) = connect(&args[0], ns.as_deref().unwrap_or("graphlink-cli"), token_file.as_deref());
+    let (mut tcp, mut link) = connect(&args[0], ns.as_deref().unwrap_or("graphlink-cli"), token_file.as_deref(), (tls_cert.clone(), tls_name.clone()));
     tcp.send(&link.send(vec![Op::Wr { wid: "w1".into(), id: args[1].clone(), prop: args[2].clone(), value }]).unwrap()).ok();
     let end = Instant::now() + Duration::from_secs(5);
     while Instant::now() < end {

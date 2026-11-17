@@ -353,3 +353,47 @@ fn a_bridge_open_beyond_loopback_must_check_tokens() {
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("--secret-file"), "{}", String::from_utf8_lossy(&o.stderr));
 }
+
+// ---- TLS ---------------------------------------------------------------------------------------------------------------------------------------
+
+fn tls_dir(tag: &str) -> std::path::PathBuf { std::env::temp_dir().join(format!("graphlink-bridge-tls-{tag}-{}-{}", std::process::id(), unique())) }
+
+#[test]
+fn a_listening_bridge_makes_its_certificate_and_a_remote_that_trusts_it_reaches_the_seat() {
+    let d = tls_dir("listen");
+    let (mut seat, addr) = Seat::start_listening_with(&["--tls-dir", d.to_str().unwrap()]);
+    assert!(d.join("cert.pem").is_file() && d.join("key.pem").is_file(), "the bridge makes its certificate before it says it listens");
+    let cert = d.join("cert.pem");
+    let out = Command::new(cli_bin()).args(["write", &addr, "membrane::Lamp:1", "power", "\"on\"", "--tls-cert", cert.to_str().unwrap()]).stdout(Stdio::piped()).spawn().unwrap();
+    assert!(seat.until(10000, |s| s.ops().iter().any(|o| matches!(o, Op::Wr { .. }))), "{}", seat.stderr());
+    let wid = seat.ops().iter().find_map(|o| if let Op::Wr { wid, .. } = o { Some(wid.clone()) } else { None }).unwrap();
+    seat.send(vec![Op::Res { wid, refused: None }]);
+    assert_eq!(String::from_utf8_lossy(&out.wait_with_output().unwrap().stdout).trim(), "ok");
+}
+
+#[test]
+fn a_remote_that_is_plain_or_trusts_another_certificate_never_reaches_the_seat() {
+    let d = tls_dir("mine");
+    let (seat, addr) = Seat::start_listening_with(&["--tls-dir", d.to_str().unwrap()]);
+    let other = tls_dir("other");
+    graphlink_net::tls::make_certs(&other, &["127.0.0.1".to_string(), "localhost".to_string()]).unwrap();
+    let wrong = Command::new(cli_bin()).args(["write", &addr, "membrane::Lamp:1", "power", "\"on\"", "--tls-cert", other.join("cert.pem").to_str().unwrap()]).output().unwrap();
+    assert!(!wrong.status.success(), "a certificate the client does not trust was accepted");
+    let plain = Command::new(cli_bin()).args(["write", &addr, "membrane::Lamp:1", "power", "\"on\""]).output().unwrap();
+    assert!(!plain.status.success(), "a plain client was served by a TLS bridge");
+    assert!(!seat.ops().iter().any(|o| matches!(o, Op::Wr { .. })));
+}
+
+#[test]
+fn a_connecting_bridge_checks_the_remotes_certificate() {
+    let d = tls_dir("remote");
+    let remote = serve_with(&["--tls-dir", d.to_str().unwrap()]);
+    let cert = d.join("cert.pem");
+    let mut seat = Seat::start_with(&remote, &["--tls-cert", cert.to_str().unwrap()]);
+    assert!(seat.until(10000, opened), "{}", seat.stderr());
+    seat.send(vec![Op::Sub { target: Target::Id("kitchen::Lamp:desk".into()), props: Some(vec!["power".into()]), limit: None }]);
+    assert!(seat.until(10000, |s| s.cell(&key("kitchen::Lamp:desk", "power")) == Some(json!("off"))), "{}", seat.stderr());
+    // no certificate named: the bridge speaks plain to a TLS remote and gets nowhere
+    let mut plain = Seat::start(&remote);
+    assert!(!plain.until(2000, opened), "the bridge opened a plain link to a TLS remote");
+}
