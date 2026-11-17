@@ -31,7 +31,7 @@ It is the part of the protocol that needs no VM and no network; the VM ([cliffvm
 | `transport::Transport`, `transport::pipe` | the one edge to the outside (`send`, a non-blocking `recv`), and an in-memory pair for tests |
 | `frame::negotiate` | the highest protocol version two peers share, or the `failed` op to answer with |
 
-Not built yet: CBOR encoding of whole frames (the value coder itself is built; the control rings carry JSON), the store trait (what an engine gives the library), the C interface and the language bindings, a Windows backend for the named regions, the upgrade of a link from TCP to shared memory (the `upgrade` op and its link state are built; the programs do not act on it), a heartbeat for a program that hangs without ending, and a seat writing a node of another seat. `docs/frames.md` lists the decisions that are the operator's.
+Not built yet: CBOR encoding of whole frames (the value coder itself is built; the control rings carry JSON), the store trait (what an engine gives the library), the C interface and the language bindings, a Windows backend for the named regions, the upgrade of a link from TCP to shared memory (the `upgrade` op and its link state are built; the programs do not act on it), a heartbeat for a program that hangs without ending, and a seat writing a node of another seat. `docs/frames.md` lists the decisions that are still the operator's.
 
 ## Crates
 
