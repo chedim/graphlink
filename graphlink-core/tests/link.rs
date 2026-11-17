@@ -113,3 +113,58 @@ fn a_frame_in_a_version_not_negotiated_is_refused() {
     let eb = pump(&mut b, &mut tb);
     assert!(matches!(&eb[..], [Event::Refused { .. }]), "{eb:?}");
 }
+
+fn hello_frame(n: u64, support: &[u32]) -> Frame {
+    Frame { v: 1, n, ack: 0, ops: vec![Op::Hello { ns: "peer".into(), build: "t".into(), epoch: 1.0, have: Default::default(), support: support.to_vec() }] }
+}
+
+#[test]
+fn a_failed_from_the_peer_closes_the_link_and_what_comes_after_is_ignored() {
+    let mut l = Link::new(me("seat", &[1]));
+    l.open();
+    let (ev, reply) = l.receive(Frame { v: 1, n: 1, ack: 1, ops: vec![Op::Failed { support: vec![2], why: "nothing in common".into() }] });
+    assert_eq!(ev, vec![Event::Failed { why: "nothing in common".into() }]);
+    assert!(reply.is_none(), "a failed is not answered");
+    assert!(!l.is_open());
+    let (ev, reply) = l.receive(hello_frame(2, &[1]));
+    assert!(ev.is_empty() && reply.is_none(), "a closed link ignores everything");
+}
+
+#[test]
+fn an_op_before_the_peers_hello_is_refused_and_not_delivered() {
+    let mut l = Link::new(me("seat", &[1]));
+    l.open();
+    let (ev, _) = l.receive(Frame { v: 1, n: 1, ack: 1, ops: vec![Op::Unsub { target: Target::Id("e".into()) }] });
+    assert!(matches!(&ev[..], [Event::Refused { .. }]), "{ev:?}");
+    assert!(!l.is_open());
+}
+
+#[test]
+fn the_ops_after_a_bye_in_the_same_frame_are_not_delivered() {
+    let (mut a, mut b, mut ta, mut tb) = open_pair(&[1], &[1]);
+    pump(&mut a, &mut ta); pump(&mut b, &mut tb);
+    let f = a.send(vec![
+        Op::Unsub { target: Target::Id("one".into()) },
+        Op::Bye { why: "enough".into() },
+        Op::Unsub { target: Target::Id("two".into()) },
+    ]).unwrap();
+    ta.send(&f).unwrap();
+    let eb = pump(&mut b, &mut tb);
+    assert_eq!(eb.len(), 3, "{eb:?}");
+    assert!(matches!(&eb[0], Event::Op(Op::Unsub { target: Target::Id(i) }) if i == "one"));
+    assert!(matches!(&eb[1], Event::Op(Op::Bye { .. })));
+    assert_eq!(eb[2], Event::Closed { why: "enough".into() });
+}
+
+#[test]
+fn a_hello_that_arrives_before_we_open_opens_the_link_when_we_do() {
+    let mut l = Link::new(me("seat", &[1, 2]));
+    let (ev, reply) = l.receive(hello_frame(1, &[2]));
+    assert!(matches!(&ev[..], [Event::Opened { version: 2, .. }]), "{ev:?}");
+    assert!(reply.is_none());
+    assert!(!l.is_open(), "our hello is not sent yet");
+    let hello = l.open();
+    assert_eq!((hello.n, hello.ack), (1, 1), "our first frame acknowledges theirs");
+    assert!(l.is_open());
+    assert_eq!(l.send(vec![]).unwrap().v, 2, "frames are written in the agreed version");
+}
