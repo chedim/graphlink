@@ -34,7 +34,15 @@ The unit of ordering is the **frame**, a JSON object (the CBOR encoding for devi
 - **Version negotiation.** A `hello` lists every version its sender speaks in `support`. The receiver picks the HIGHEST version both speak and writes every later frame in that version. If there is none, it answers `failed` with its own `support` and closes; the sender may retry with a version from that list. The `hello` itself is written in the highest version its sender speaks, so a peer that speaks only older versions can still decode it (a `hello` is decodable by every version: it is the one op whose shape never changes).
 - This slice has one version, `1`.
 
+## Ordering (`n` and `ack`)
+
+- Each side numbers the frames it sends 1, 2, 3, ... (`n`) and puts the highest `n` it has taken from the peer in `ack` (0 before any). Frames of one link are processed in `n` order.
+- A frame whose `n` is not above the highest taken is a **duplicate** (a retried request) and is dropped. A frame whose `n` skips one is a **gap**: it is not taken, and the receiver is told which `n` was expected. What a gap means (ask again, resync, close) is the engine's decision; the counters only report it.
+- `ack` only moves forward and never names a frame that was not sent; an ack that does either is ignored by the sender (`Outbox::acked` says so).
+- How many frames may be unacknowledged before the sender stops (the window) is not set here: it is a number for the operator.
+
 ## Decisions (the operator's; nothing here sets them)
 
 1. The version number of the first protocol is `1`.
-2. `res` does not carry the node's revision `r` yet (babyseat `docs/waves.md`, section 6); it is added only when the operator agrees.
+2. Counting starts at 1 and goes up by one per frame.
+3. `res` does not carry the node's revision `r` yet (babyseat `docs/waves.md`, section 6); it is added only when the operator agrees.
