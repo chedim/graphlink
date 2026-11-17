@@ -1,0 +1,11 @@
+[package]
+name = "graphlink-net"
+version = "0.0.1"
+edition = "2021"
+description = "A TCP transport for graphlink-core: one JSON frame per line, non-blocking"
+license = "MIT"
+publish = false
+
+[dependencies]
+graphlink-core = { path = "../graphlink-core" }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }

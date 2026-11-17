@@ -1,0 +1,16 @@
+[package]
+name = "graphlink-cli"
+version = "0.0.1"
+edition = "2021"
+description = "graphlink: serve a few nodes, watch them, write one (a debugging tool and a demo peer for graphlink-core)"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "graphlink"
+path = "src/main.rs"
+
+[dependencies]
+graphlink-core = { path = "../graphlink-core" }
+graphlink-net = { path = "../graphlink-net" }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }

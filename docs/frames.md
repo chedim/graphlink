@@ -19,7 +19,7 @@ The unit of ordering is the **frame**, a JSON object (the CBOR encoding for devi
 | `failed` | `support`, `why` | the answer to a `hello` with no version in common; `support` is what the sender speaks; the sender closes after it |
 | `sub` | `id` or `prefix`, `props?`, `limit?` | subscribe; a prefix is bounded by `limit` and REFUSED, not truncated, when more match |
 | `unsub` | `id` or `prefix` | drop |
-| `val` | `id`, `r`, then `props` or `gone` or `refused` | the current value of a subscribed node; `r` its revision |
+| `val` | `id`, `r`, `rid?`, then `props` or `gone` or `refused` | the current value of a node; `r` its revision; `rid` names the `read` it answers (a pushed value has none) |
 | `read` | `id`, `props`, `rid` | read once, no subscription; answered by a `val` carrying `rid` |
 | `wr` | `wid`, `id`, `prop`, `value` | forwarded write request |
 | `res` | `wid`, then `ok` or `refused` | the answer to a `wr` |
