@@ -4,13 +4,13 @@ use graphlink_core::link::{Event, Link, Me};
 use graphlink_core::transport::{pipe, Transport};
 use serde_json::json;
 
-fn me(ns: &str) -> Me { Me { ns: ns.into(), build: "t".into(), epoch: 1.0, support: vec![VERSION] } }
+fn me(ns: &str, initiator: bool) -> Me { Me { ns: ns.into(), build: "t".into(), epoch: 1.0, support: vec![VERSION], initiator } }
 
 fn shm() -> Proposal { Proposal::Shm { name: "/gl-kitchen-ab12".into(), ring_bytes: 4096, slots: 64, key_cap: 64, val_cap: 256 } }
 
 fn open_pair() -> (Link, Link, impl Transport, impl Transport) {
     let (mut ta, mut tb) = pipe();
-    let (mut a, mut b) = (Link::new(me("seat")), Link::new(me("kitchen")));
+    let (mut a, mut b) = (Link::new(me("seat", true)), Link::new(me("kitchen", false)));
     ta.send(&a.open()).unwrap(); tb.send(&b.open()).unwrap();
     let pump = |l: &mut Link, t: &mut dyn FnMut() -> Option<Frame>| { while let Some(f) = t() { l.receive(f); } };
     pump(&mut a, &mut || ta.recv().unwrap()); pump(&mut b, &mut || tb.recv().unwrap());
@@ -84,7 +84,7 @@ fn nothing_can_be_sent_while_an_upgrade_is_pending_and_a_second_proposal_is_an_e
 
 #[test]
 fn a_link_that_is_not_open_cannot_propose_and_a_peer_with_nothing_proposed_cannot_accept() {
-    let mut l = Link::new(me("seat"));
+    let mut l = Link::new(me("seat", true));
     assert!(l.propose(shm()).is_err());
     let (_a, mut b, _ta, _tb) = open_pair();
     assert!(b.accept_upgrade().is_err());
@@ -110,4 +110,20 @@ fn ops_other_than_the_upgrade_still_arrive_in_order_around_it() {
     eb.extend(deliver(&mut ta, up, &mut b, &mut tb));
     assert!(matches!(&eb[0], Event::Op(Op::Unsub { .. })));
     assert_eq!(eb[1], Event::UpgradeProposed(Proposal::Encoding("cbor".into())));
+}
+
+#[test]
+fn when_both_peers_propose_at_once_the_initiators_proposal_stands_and_the_other_gives_up_its_own() {
+    let (mut a, mut b, mut ta, mut tb) = open_pair();   // a is the initiator
+    let fa = a.propose(shm()).unwrap();
+    let fb = b.propose(Proposal::Encoding("cbor".into())).unwrap();
+    // the initiator's proposal reaches b: b drops its own and is asked to answer the initiator's
+    let eb = deliver(&mut ta, fa, &mut b, &mut tb);
+    assert_eq!(eb, vec![Event::UpgradeProposed(shm())]);
+    // b's proposal reaches the initiator: it is ignored, nothing for the caller to do
+    let ea = deliver(&mut tb, fb, &mut a, &mut ta);
+    assert!(ea.is_empty(), "{ea:?}");
+    let accepted = b.accept_upgrade().unwrap();
+    assert_eq!(deliver(&mut tb, accepted, &mut a, &mut ta), vec![Event::Upgraded(shm())]);
+    assert!(a.send(vec![]).is_ok() && b.send(vec![]).is_ok(), "both can send again");
 }

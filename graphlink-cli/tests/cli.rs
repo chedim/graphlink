@@ -105,7 +105,7 @@ fn a_value_that_is_not_json_is_a_usage_error_before_any_connection() {
 fn a_read_is_answered_by_a_val_carrying_its_rid_and_makes_no_subscription() {
     let s = serve();
     let mut t = Tcp::connect(&s.addr).unwrap();
-    let mut link = Link::new(Me { ns: "probe".into(), build: "t".into(), epoch: 1.0, support: vec![VERSION] });
+    let mut link = Link::new(Me { ns: "probe".into(), build: "t".into(), epoch: 1.0, support: vec![VERSION], initiator: true });
     t.send(&link.open()).unwrap();
     let end = Instant::now() + Duration::from_secs(5);
     let mut events = vec![];
@@ -127,7 +127,7 @@ fn a_read_is_answered_by_a_val_carrying_its_rid_and_makes_no_subscription() {
 /// connect a raw peer, open, send `ops` once open, and return the first op that satisfies `want`
 fn ask(addr: &str, ops: Vec<Op>, want: impl Fn(&Op) -> bool) -> Op {
     let mut t = Tcp::connect(addr).unwrap();
-    let mut link = Link::new(Me { ns: "probe".into(), build: "t".into(), epoch: 1.0, support: vec![VERSION] });
+    let mut link = Link::new(Me { ns: "probe".into(), build: "t".into(), epoch: 1.0, support: vec![VERSION], initiator: true });
     t.send(&link.open()).unwrap();
     let (mut sent, end) = (false, Instant::now() + Duration::from_secs(5));
     while Instant::now() < end {

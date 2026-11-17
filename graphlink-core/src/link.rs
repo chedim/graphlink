@@ -7,7 +7,8 @@ use crate::order::{Inbox, Outbox, Take};
 
 /// What this side says about itself in its `hello`.
 #[derive(Clone, Debug)]
-pub struct Me { pub ns: String, pub build: String, pub epoch: f64, pub support: Vec<u32> }
+/// `initiator`: this side opened the connection (or made the control region): its upgrade proposal wins when both peers propose at once.
+pub struct Me { pub ns: String, pub build: String, pub epoch: f64, pub support: Vec<u32>, pub initiator: bool }
 
 /// What `receive` tells the engine.
 #[derive(Clone, Debug, PartialEq)]
@@ -118,11 +119,14 @@ impl Link {
                 Op::Unknown(_) => {}
                 _ if !self.hello_seen => { events.push(Event::Refused { why: "an op before the peer's hello".into() }); break; }
                 _ if self.state == State::Open && frame.v != self.version => { events.push(Event::Refused { why: format!("a frame in version {}, the link speaks {}", frame.v, self.version) }); break; }
-                Op::Upgrade(p) => {
-                    if self.upgrade != Upgrade::None || self.state != State::Open { events.push(Event::Refused { why: "an upgrade while another is pending".into() }); break; }
-                    self.upgrade = Upgrade::Incoming(p.clone());
-                    events.push(Event::UpgradeProposed(p));
-                }
+                Op::Upgrade(p) => match &self.upgrade {
+                    _ if self.state != State::Open => { events.push(Event::Refused { why: "an upgrade before the link is open".into() }); break; }
+                    Upgrade::None => { self.upgrade = Upgrade::Incoming(p.clone()); events.push(Event::UpgradeProposed(p)); }
+                    // both proposed at once: the initiator's stands; the other gives up its own and is asked to answer the initiator's
+                    Upgrade::Proposed(_) if self.me.initiator => {}
+                    Upgrade::Proposed(_) => { self.upgrade = Upgrade::Incoming(p.clone()); events.push(Event::UpgradeProposed(p)); }
+                    Upgrade::Incoming(_) => { events.push(Event::Refused { why: "an upgrade while another is pending".into() }); break; }
+                },
                 Op::Upgraded(p) => match &self.upgrade {
                     Upgrade::Proposed(q) if *q == p => { self.upgrade = Upgrade::None; events.push(Event::Upgraded(p)); }
                     _ => { events.push(Event::Refused { why: "an upgraded nobody asked for".into() }); break; }
