@@ -1,6 +1,13 @@
-# Shared memory: a table of cells holding CBOR values (DESIGN, not built)
+# Shared memory: a table of cells holding CBOR values (the control rings are built in `graphlink-shm`; the cell table is design)
 
 Status: **design. Nothing here is built.** Decided by the operator: values in shared memory are CBOR items, in a table with one slot per cell. Every size, limit and number below is a DECISION for the operator and is marked as one; none is set.
+
+**Built (`graphlink-shm`):** the control rings (`Shm`, a `Transport`) and the cell table (`cells`).
+- The control side: the region is a NAMED region both processes map (`shm_open`: RAM only on Linux, nothing on disk): a 128-byte header (magic, layout version 1, ring size, a closed flag per end), then two single-producer rings, one per direction. A frame is a 4-byte length and its JSON bytes, wrapping around the ring's end; `recv` never waits; a sender whose ring is full queues the rest locally and writes it as the reader makes room AND the sender calls `flush`, `send` or `recv` (`pending_bytes` says how much still waits: a sender that stops calling leaves the rest queued, so one that is finished keeps flushing until it is zero; dropping an end makes one last try); every length read from the region is checked, and a corrupt ring closes the link with an error. The creator removes the name when it goes.
+- The cell table: a named region the OWNER creates and is the only writer of; a reader maps it READ-ONLY, so it cannot write into it. A slot is a sequence number (a seqlock), a state, the key, a revision and ONE CBOR value (`graphlink_core::cbor`). Capacities are FIXED when the table is made (slots, bytes of a key, bytes of an encoded value): there is no arena, so nothing to reclaim; a value that does not fit is an error to the owner, and a full table too. Keys are never removed (a node that goes away is `Gone`), so a lookup stops at the first empty slot. A reader gives `spins` (how many times to try a slot being written before it reports "never settled", the stuck-writer rule is the caller's number) and `depth` (how deep a value may nest). A bad slot is an error, never a panic. `epoch` tells a reader the owner restarted.
+- A region is identified by a NAME: one slash and at most 31 bytes (macOS's limit; the shortest of the systems), never a path. A Windows backend would give the same name to a named file mapping; it is not built.
+- Not built: CBOR frames on the control rings, a heartbeat for an end that dies without dropping (the closed flag is set only on a clean drop), and Windows.
+- This replaces the arena of section 2 with fixed-capacity slots: simpler, no reclaim rule, a cap on the value size (a decision recorded here: the operator can ask for an arena later).
 
 ## 1. Why this and not frames
 
