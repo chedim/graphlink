@@ -209,3 +209,16 @@ fn a_sender_that_goes_away_with_frames_queued_flushes_what_fits_on_the_way_out()
     while let Some(f) = b.recv().unwrap() { assert_eq!(f, frame(n, "last words")); n += 1; }
     assert_eq!(n, 5, "what was written before the creator went is still readable");
 }
+
+#[test]
+fn a_name_a_dead_creator_left_behind_can_be_removed_and_then_made_again() {
+    let p = path();
+    let dead = Shm::create(&p, 4096).unwrap();
+    std::mem::forget(dead);   // a creator that died without cleaning up: the name stays
+    assert!(Shm::create(&p, 4096).err().unwrap().contains("cannot create"), "the stale name blocks a new creator");
+    assert_eq!(graphlink_shm::remove_region(&p), Ok(true), "removed");
+    let again = Shm::create(&p, 4096).unwrap();
+    drop(again);
+    assert_eq!(graphlink_shm::remove_region(&p), Ok(false), "nothing left to remove");
+    assert!(graphlink_shm::remove_region("not a name").unwrap_err().contains("region name"));
+}
