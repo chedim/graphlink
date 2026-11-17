@@ -1,15 +1,14 @@
 name: publish
 
-# The graphlink crates go to crates.io when a GitHub release is published (the tag is `v<version>`, the one version of every crate: Cargo.toml [workspace.package]).
-#   1. bump `version` in [workspace.package] and the four `version` of [workspace.dependencies] to X.Y.Z, merge
-#   2. publish a GitHub release with the tag vX.Y.Z (a pre-release publishes nothing)
-# Needs the repository secret CARGO_REGISTRY_TOKEN (a crates.io API token with the scopes publish-new and publish-update). On every push and pull request only the dry run runs: it packages and
-# builds every crate as crates.io would receive it, in dependency order, and uploads nothing.
+# A merge into the branch `release` publishes: the crates go to crates.io and a GitHub release `v<version>` is made, in one run (a release made by a workflow does not start another workflow, so
+# nothing waits for a second trigger). The version is the one version of every crate, `[workspace.package]` in Cargo.toml (and the four sibling `version`s of `[workspace.dependencies]`).
+#   1. bump the version (all five places), merge it into main
+#   2. merge main into `release`: this workflow checks, tests, publishes and tags
+# A push to `release` whose version already has its tag publishes nothing (a notice says so): a fix that is not a release can be merged there without one. Needs the repository secret
+# CARGO_REGISTRY_TOKEN. On every other push and on pull requests only the dry run runs: it packages and builds every crate as crates.io would receive it, in dependency order, and uploads nothing.
 on:
   push:
   pull_request:
-  release:
-    types: [published]
 
 jobs:
   dry-run:
@@ -21,26 +20,40 @@ jobs:
       - run: cargo publish --workspace --dry-run
 
   publish:
-    if: github.event_name == 'release' && !github.event.release.prerelease
+    if: github.event_name == 'push' && github.ref == 'refs/heads/release'
     needs: dry-run
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # the tag and the release
+    concurrency:
+      group: publish    # two merges into `release` do not publish at once
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.release.tag_name }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: the tag is the version of every crate
-        env:
-          TAG: ${{ github.event.release.tag_name }}
+      - name: the version, and whether it is already released
+        id: v
         run: |
           set -e
           versions=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print("\n".join(sorted({p["version"] for p in json.load(sys.stdin)["packages"]})))')
-          if [ "$versions" != "${TAG#v}" ]; then echo "::error::the tag is $TAG but the crates are at: $versions (they must all be ${TAG#v})"; exit 1; fi
-      - run: cargo test --workspace
-      - name: publish, in dependency order
+          if [ "$(echo "$versions" | wc -l | tr -d ' ')" != 1 ]; then echo "::error::the crates are not all at one version: $versions"; exit 1; fi
+          echo "version=$versions" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$versions" > /dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v$versions is already released: nothing is published (bump the version to release)"
+          fi
+      - if: steps.v.outputs.skip != 'true'
+        run: cargo test --workspace
+      - name: crates.io, in dependency order
+        if: steps.v.outputs.skip != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           [ -n "$CARGO_REGISTRY_TOKEN" ] || { echo "::error::the repository secret CARGO_REGISTRY_TOKEN is not set"; exit 1; }
           cargo publish --workspace
+      - name: the GitHub release
+        if: steps.v.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes
