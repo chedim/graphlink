@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+title: "graphlink"
+type: software
+authors:
+  - given-names: "Dmitrii O."
+    family-names: "Chechetkin"
+repository-code: "https://github.com/chedim/graphlink"
+license: MIT
+abstract: >-
+  graphlink is a protocol for linking graphs that live in different processes or
+  machines: a node is owned by a namespace, other peers keep demand-driven replicas
+  of it, and a write goes through the owner. The crates are the protocol core (frames, the
+  subscription table, replica notes; no network and no VM), a TCP transport, a
+  shared-memory transport (control rings and a table of cells), HS256 tokens, a
+  bridge that joins a seat to a remote peer, and a command-line tool.
+keywords:
+  - graph
+  - protocol
+  - replication
+  - shared memory
