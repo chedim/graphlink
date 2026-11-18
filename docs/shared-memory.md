@@ -39,6 +39,23 @@ The owner writes a slot like this: make its sequence number odd, write the cell,
 - **An owner that dies mid-write** leaves an odd number that never settles. The reader needs a rule for it (how long to retry, then treat the cell as `gone` or the link as closed); the time is a decision. The header's epoch tells a reader the owner restarted.
 - **An arena that fills:** values are appended and old ones are reclaimed by the owner when no slot points at them; the reader's check of "the slot did not change" covers a value that moved. The reclaim rule and the full-arena behaviour are decisions.
 
+## 4b. Reclaiming slots (the owner side and the ack cell are built in `graphlink-shm`; the readers and the owners that use them are not)
+
+**The gap.** A slot is never reused: a key stays in its slot for the life of the table, and a node that goes away becomes `Gone` and keeps the slot (section 2: lookups stop at the first empty slot, so removing a key would hide the keys placed after it). A peer that creates short-lived nodes, one per request for example, fills its table and then every write fails with "the table is full". Nodes that live as long as the table (a lamp, a sensor) never meet this. Found by membrama, which writes a chat request per model turn.
+
+**The rule: a `Gone` slot may be reused once the reader has seen the removal.** A reader learns that a node is gone from its `Gone` cell, so the owner must not take the slot back before the reader has read it. The reader cannot write into the owner's table (its mapping is read-only on purpose), so it says what it has seen in a cell of its OWN table, which the owner already maps read-only. Each table has one reader, the peer at the other end of the link.
+
+- **Numbering.** Each removal is numbered: a counter in the header (`gone_seq`) and, in the `Gone` cell, its own number (kept in the cell's value, which readers still see as null). A cell that is already `Gone` keeps its number. The slot is written first and the counter raised after, so a reader that has read the counter and then scans sees every removal up to it.
+- **The reader's turn:** read `gone_seq` of the owner's table, scan the table, process what it found (including the `Gone` cells), then say `ack_seen(g)` with the number it read first. The acknowledgement is one cell in the reader's own table (a reserved key starting with U+0002, rewritten in place, so it never takes another slot, and left out of scans).
+- **The owner's turn:** read the reader's acknowledgement (`peer_ack` on the reader's table; 0 when the reader has said nothing) and call `reuse_gone_up_to`. A new key may then take a `Gone` slot whose number is at most that. The probe chain is walked first, so a key that sits after such a slot is found and not duplicated, and a `Live` or `Refused` cell is never taken.
+- **A reader that never acknowledges** (an old one, or one that has stalled) changes nothing: the table fills as it does today. There is no wrong answer in that case, only no reclaiming.
+- **No change to the layout version.** The counter uses a header word that was unused, and an old reader sees the same cells.
+- **More than one reader of a table** is not a case today; it would use the smallest acknowledgement.
+
+**Not built.** A reader that does not scan the whole table (it reads only some keys) cannot acknowledge a number that covers cells it never looked at; it would acknowledge per cell, a list of slot and number pairs in the ack cell (limited by the value size). Our readers scan everything, so the single number is enough. A rebuild of the table in place under a table-level seqlock, for an owner whose reader has stalled, was considered and is not built: it would need every reader to learn a new rule and a layout bump.
+
+**Work this needs.** `graphlink-shm` (done: the numbering, the reuse, the ack cell, tests); the readers acknowledge (`graphlink-bridge`, cliffvm's peer driver, membrama's peer) and the owners call `reuse_gone_up_to` (cliffvm for the seat's table, membrama for its own); then releases in that order (graphlink, cliffvm, babyseat, membrama).
+
 ## 5. Safety
 
 - The region is shared with another process, so every byte read is untrusted: bounds on every offset and length, a limit on the nesting of a value, and no allocation sized by a field in the region.
