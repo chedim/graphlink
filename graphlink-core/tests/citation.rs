@@ -49,3 +49,18 @@ fn a_doi_in_the_citation_file_is_the_readmes_badge_and_is_listed_as_an_identifie
     let top: String = readme.lines().take(6).collect::<Vec<_>>().join("\n");
     assert!(top.contains(&format!("[![DOI](https://zenodo.org/badge/DOI/{doi}.svg)](https://doi.org/{doi})")), "the badge is in the first lines of the README: {top}");
 }
+
+/// Every DOI in the citation file is a Zenodo DOI of the form 10.5281/zenodo.<digits> and is listed once, and the version DOIs name different versions (a guard: the DOIs are copied from
+/// Zenodo's records by hand after each release).
+#[test]
+fn the_dois_in_the_citation_file_are_well_formed_and_listed_once() {
+    let c = read(&root().join("CITATION.cff"));
+    let dois: Vec<&str> = c.lines().filter_map(|l| l.trim().strip_prefix("value: \"").and_then(|v| v.strip_suffix('"'))).collect();
+    assert!(!dois.is_empty(), "no DOI listed");
+    for d in &dois { assert!(d.strip_prefix("10.5281/zenodo.").map_or(false, |n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())), "{d}"); }
+    let mut once = dois.clone(); once.sort(); once.dedup();
+    assert_eq!(once.len(), dois.len(), "a DOI is listed twice: {dois:?}");
+    let versions: Vec<&str> = c.lines().filter_map(|l| l.trim().strip_prefix("description: \"Version DOI of ").and_then(|v| v.strip_suffix('"'))).collect();
+    let mut v = versions.clone(); v.sort(); v.dedup();
+    assert_eq!(v.len(), versions.len(), "two version DOIs name the same version: {versions:?}");
+}
