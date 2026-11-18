@@ -183,6 +183,13 @@ impl Cells {
     pub fn get(&self, key: &str, spins: u64, depth: usize) -> Result<Option<Cell>, String> { self.v.get(key, spins, depth) }
     pub fn scan(&self, prefix: &str, spins: u64, depth: usize) -> Result<Vec<(String, Cell)>, String> { self.v.scan(prefix, spins, depth) }
 
+    /// How many removals (a cell becoming `Gone`) this table has had. RED STUB.
+    pub fn gone_seq(&self) -> u64 { 0 }
+    /// Allow the slots of `Gone` cells stamped up to `g` to be given to new keys. RED STUB.
+    pub fn reuse_gone_up_to(&mut self, _g: u64) {}
+    /// This end is a reader of another table: say that every removal up to `g` has been seen, in a cell of this table. RED STUB.
+    pub fn ack_seen(&mut self, _g: u64) -> Result<(), String> { Ok(()) }
+
     #[doc(hidden)]
     pub fn leave_slot_mid_write_for_test(&mut self, key: &str) {
         if let Ok((i, true)) = self.find(key.as_bytes()) { let b = self.v.slot(i); let s = self.v.u64_at(b + S_SEQ).load(Ordering::Relaxed); self.v.u64_at(b + S_SEQ).store(s | 1, Ordering::Release); }
@@ -229,6 +236,10 @@ impl CellsReader {
 
     /// the owner's epoch: it changes when the owner restarts
     pub fn epoch(&self) -> u64 { self.v.u64_at(H_EPOCH).load(Ordering::Relaxed) }
+    /// How many removals the owner has made. RED STUB.
+    pub fn gone_seq(&self) -> u64 { 0 }
+    /// The removals the other end says it has seen (0 when it has said nothing). RED STUB.
+    pub fn peer_ack(&self, _spins: u64, _depth: usize) -> Result<u64, String> { Ok(0) }
     /// the owner has gone (it dropped its end)
     pub fn is_closed(&self) -> bool { self.v.u32_at(H_CLOSED).load(Ordering::Acquire) != 0 }
 
