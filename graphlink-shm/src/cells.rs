@@ -21,6 +21,10 @@ const H_KEY_CAP: usize = 24;
 const H_VAL_CAP: usize = 28;
 const H_EPOCH: usize = 32;
 const H_CLOSED: usize = 40;
+const H_GONE: usize = 48;   // how many removals the owner has made (a Gone cell carries its number); raised AFTER the slot is written
+
+/// The key of the cell in which a reader says how far it has seen the other table's removals. It starts with U+0002, which no node id uses (ids use U+0001 between the node and the prop), and scans leave it out.
+const ACK_KEY: &str = "\u{2}ack";
 
 const S_SEQ: usize = 0;
 const S_STATE: usize = 8;
@@ -80,7 +84,8 @@ impl View {
     }
 
     fn cell(&self, state: u32, rev: f64, val: &[u8], depth: usize) -> Result<Cell, String> {
-        let value = cbor::decode(val, depth).map_err(|e| format!("corrupt value: {e}"))?;
+        // a Gone cell's value is the number of its removal (the owner's bookkeeping): a reader sees null
+        let value = if state == GONE { J::Null } else { cbor::decode(val, depth).map_err(|e| format!("corrupt value: {e}"))? };
         Ok(Cell { rev, state: match state { LIVE => CellState::Live, GONE => CellState::Gone, _ => CellState::Refused }, value })
     }
 
@@ -95,11 +100,13 @@ impl View {
         Ok(None)
     }
 
+    fn gone_seq(&self) -> u64 { self.u64_at(H_GONE).load(Ordering::Acquire) }
+
     fn scan(&self, prefix: &str, spins: u64, depth: usize) -> Result<Vec<(String, Cell)>, String> {
         let mut out = vec![];
         for i in 0..self.slots {
             let (state, k, rev, val) = self.read_slot(i, spins)?;
-            if state == EMPTY || !k.starts_with(prefix.as_bytes()) { continue; }
+            if state == EMPTY || !k.starts_with(prefix.as_bytes()) || k.first() == Some(&2u8) { continue; }
             let key = String::from_utf8(k).map_err(|_| format!("corrupt slot {i} (a key that is not UTF-8)"))?;
             out.push((key, self.cell(state, rev, &val, depth)?));
         }
@@ -108,7 +115,7 @@ impl View {
 }
 
 /// The owner's end: creates the table, writes it, removes the file when it goes.
-pub struct Cells { v: View, len: usize, name: String, _file: std::fs::File }
+pub struct Cells { v: View, len: usize, name: String, _file: std::fs::File, reusable: u64, ack_rev: u64 }
 
 unsafe impl Send for Cells {}
 
@@ -122,7 +129,7 @@ impl Cells {
         let len = HEADER + slots as usize * stride;
         let file = open_region(&name, Some(len), true)?;
         let base = match map(&file, len) { Ok(b) => b, Err(e) => { unlink_region(&name); return Err(e); } };
-        let c = Cells { v: View { base, slots, key_cap: key_cap as usize, val_cap: val_cap as usize, stride }, len, name, _file: file };
+        let c = Cells { v: View { base, slots, key_cap: key_cap as usize, val_cap: val_cap as usize, stride }, len, name, _file: file, reusable: 0, ack_rev: 0 };
         c.v.u32_at(H_LAYOUT).store(LAYOUT, Ordering::Relaxed);
         c.v.u64_at(H_SLOTS).store(slots, Ordering::Relaxed);
         c.v.u32_at(H_KEY_CAP).store(key_cap, Ordering::Relaxed);
@@ -147,23 +154,42 @@ impl Cells {
         self.v.u64_at(base + S_SEQ).store(seq + 2, Ordering::Release);
     }
 
-    /// the slot of `key`, or the empty slot it would take
+    /// The removal number a `Gone` slot carries (its value), or `None` for a value that is not one.
+    fn stamp(&self, i: u64) -> Option<u64> {
+        let (_, _, _, val) = self.v.read_slot(i, 1).ok()?;
+        match cbor::decode(&val, 2).ok()? { J::Number(n) => n.as_u64(), _ => None }
+    }
+
+    /// The slot of `key`, or the slot a new `key` would take: the first empty one, or a `Gone` slot the reader has acknowledged (its removal number is at most
+    /// `reusable`). The whole probe chain is walked first, because the key may sit after such a slot.
     fn find(&self, key: &[u8]) -> Result<(u64, bool), String> {
         let h = hash(key);
+        let mut reusable: Option<u64> = None;
         for step in 0..self.v.slots {
             let i = h.wrapping_add(step) % self.v.slots;
             let base = self.v.slot(i);
-            if self.v.u32_at(base + S_STATE).load(Ordering::Relaxed) == EMPTY { return Ok((i, false)); }
+            let state = self.v.u32_at(base + S_STATE).load(Ordering::Relaxed);
+            if state == EMPTY { return Ok((reusable.unwrap_or(i), false)); }
             let n = self.v.u32_at(base + S_KEY_LEN).load(Ordering::Relaxed) as usize;
             if n == key.len() && self.v.copy_out(base + S_KEY, n) == key { return Ok((i, true)); }
+            if state == GONE && reusable.is_none() && self.stamp(i).is_some_and(|g| g <= self.reusable) { reusable = Some(i); }
         }
-        Err(format!("the table is full ({} slots)", self.v.slots))
+        match reusable { Some(i) => Ok((i, false)), None => Err(format!("the table is full ({} slots)", self.v.slots)) }
     }
 
     fn store(&mut self, key: &str, rev: f64, state: u32, val: &[u8]) -> Result<(), String> {
         if key.len() > self.v.key_cap { return Err(format!("the key is {} bytes, the capacity of a key is {}", key.len(), self.v.key_cap)); }
         if val.len() > self.v.val_cap { return Err(format!("the value is {} bytes encoded, the capacity of a value is {}", val.len(), self.v.val_cap)); }
-        let (i, _) = self.find(key.as_bytes())?;
+        let (i, found) = self.find(key.as_bytes())?;
+        if state == GONE {
+            // a removal is numbered once: a cell that is already Gone keeps its number; the count in the header is raised after the slot is written, so a reader that
+            // read the count and then scans sees every removal up to it
+            let existing = if found && self.v.u32_at(self.v.slot(i) + S_STATE).load(Ordering::Relaxed) == GONE { self.stamp(i) } else { None };
+            let (n, raise) = match existing { Some(n) => (n, false), None => (self.v.u64_at(H_GONE).load(Ordering::Relaxed) + 1, true) };
+            self.write_slot(i, GONE, key.as_bytes(), rev, &cbor::encode(&J::from(n)));
+            if raise { self.v.u64_at(H_GONE).store(n, Ordering::Release); }
+            return Ok(());
+        }
         self.write_slot(i, state, key.as_bytes(), rev, val);
         Ok(())
     }
@@ -182,6 +208,21 @@ impl Cells {
 
     pub fn get(&self, key: &str, spins: u64, depth: usize) -> Result<Option<Cell>, String> { self.v.get(key, spins, depth) }
     pub fn scan(&self, prefix: &str, spins: u64, depth: usize) -> Result<Vec<(String, Cell)>, String> { self.v.scan(prefix, spins, depth) }
+
+    /// How many removals (a cell becoming `Gone`) this table has had.
+    pub fn gone_seq(&self) -> u64 { self.v.gone_seq() }
+
+    /// Allow the slots of `Gone` cells whose removal number is at most `g` to be given to new keys. The caller passes what the table's reader has acknowledged
+    /// (`CellsReader::peer_ack` on the reader's table); with more than one reader, the smallest of their acknowledgements.
+    pub fn reuse_gone_up_to(&mut self, g: u64) { self.reusable = g; }
+
+    /// This end is a reader of another table: say that every removal of that table up to `g` has been seen, in a cell of this (its own) table. Read `gone_seq` of the
+    /// other table first, then scan it, then call this with what was read; the same cell is rewritten each time, so it never takes another slot.
+    pub fn ack_seen(&mut self, g: u64) -> Result<(), String> {
+        self.ack_rev += 1;
+        let rev = self.ack_rev as f64;
+        self.store(ACK_KEY, rev, LIVE, &cbor::encode(&J::from(g)))
+    }
 
     #[doc(hidden)]
     pub fn leave_slot_mid_write_for_test(&mut self, key: &str) {
@@ -229,6 +270,13 @@ impl CellsReader {
 
     /// the owner's epoch: it changes when the owner restarts
     pub fn epoch(&self) -> u64 { self.v.u64_at(H_EPOCH).load(Ordering::Relaxed) }
+    /// How many removals the owner has made.
+    pub fn gone_seq(&self) -> u64 { self.v.gone_seq() }
+
+    /// The removals of the OTHER table that this table's owner says it has seen (0 when it has said nothing): the owner of that table reads it here.
+    pub fn peer_ack(&self, spins: u64, depth: usize) -> Result<u64, String> {
+        Ok(match self.v.get(ACK_KEY, spins, depth)? { Some(c) if c.state == CellState::Live => c.value.as_u64().unwrap_or(0), _ => 0 })
+    }
     /// the owner has gone (it dropped its end)
     pub fn is_closed(&self) -> bool { self.v.u32_at(H_CLOSED).load(Ordering::Acquire) != 0 }
 
