@@ -290,3 +290,20 @@ impl Drop for CellsReader {
     fn drop(&mut self) { unmap(self.v.base, self.len); }
 }
 
+
+/// One end's bookkeeping for reclaiming slots (docs/shared-memory.md, section 4b). Each end of a link is both a reader (of the other's table) and an owner (of its own), and each turn
+/// does the two halves with the same order every time: read the count of the other table's removals BEFORE the pass that reads it, say AFTER the pass that they have been seen, and give
+/// the slots the other end has acknowledged to new keys. Every consumer of the tables does this, so it lives here.
+/// RED STUB.
+#[derive(Debug, Default)]
+pub struct Reclaim { acked: u64 }
+
+impl Reclaim {
+    pub fn new() -> Reclaim { Reclaim::default() }
+    /// The count to carry through the pass: call it before reading the other table.
+    pub fn before(theirs: &CellsReader) -> u64 { theirs.gone_seq() }
+    /// Call it after the pass that read `theirs`, with what `before` returned. RED STUB.
+    pub fn after(&mut self, _seen: u64, _theirs: &CellsReader, _mine: &mut Cells, _spins: u64, _depth: usize) -> Result<(), String> { Ok(()) }
+    /// The count this end has acknowledged so far. RED STUB.
+    pub fn acked(&self) -> u64 { 0 }
+}

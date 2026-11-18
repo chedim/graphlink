@@ -145,3 +145,52 @@ fn a_removal_counted_in_the_header_is_already_a_gone_cell_in_the_table() {
     assert!(checks > 10, "the reader ran only {checks} times");
     t.join().unwrap();
 }
+
+// ---- the helper every consumer uses: the same order of steps each turn
+
+use graphlink_shm::cells::Reclaim;
+
+#[test]
+fn two_ends_that_each_take_a_turn_with_the_helper_churn_keys_through_a_few_slots() {
+    // end X owns `x` (4 slots), end Y owns `y` (4 slots); X makes and removes nodes, Y reads X's table; each end does both halves every turn
+    let (mut x, x_read_by_y) = pair(4);
+    let (mut y, y_read_by_x) = pair(4);
+    let (mut x_rec, mut y_rec) = (Reclaim::new(), Reclaim::new());
+    for round in 0..6 {
+        for i in 0..4 { x.put(&format!("r{round}k{i}"), 1.0, &json!(i)).unwrap_or_else(|e| panic!("round {round}: {e}")); }
+        for i in 0..4 { x.mark(&format!("r{round}k{i}"), 2.0, CellState::Gone, "").unwrap(); }
+        // Y's turn: read the count, scan X's table, say it has been seen, give X-acknowledged slots to Y's own new keys
+        let seen = Reclaim::before(&x_read_by_y);
+        let rows = x_read_by_y.scan("", SPINS, DEPTH).unwrap();
+        assert_eq!(rows.iter().filter(|(_, c)| c.state == CellState::Gone).count(), 4, "round {round}");
+        y_rec.after(seen, &x_read_by_y, &mut y, SPINS, DEPTH).unwrap();
+        // X's turn: the same, as the reader of Y's table
+        let seen = Reclaim::before(&y_read_by_x);
+        let _ = y_read_by_x.scan("", SPINS, DEPTH).unwrap();
+        x_rec.after(seen, &y_read_by_x, &mut x, SPINS, DEPTH).unwrap();
+    }
+    assert_eq!(y_rec.acked(), 24);
+}
+
+#[test]
+fn a_turn_with_nothing_removed_writes_nothing() {
+    let (mut mine, _r) = pair(1);
+    mine.put("only", 1.0, &json!(1)).unwrap();          // the table is full of live cells
+    let (_theirs_w, theirs) = pair(4);
+    let mut rec = Reclaim::new();
+    rec.after(Reclaim::before(&theirs), &theirs, &mut mine, SPINS, DEPTH).expect("no removals, so no ack cell, so no slot is needed");
+    assert_eq!(rec.acked(), 0);
+}
+
+#[test]
+fn an_acknowledgement_that_cannot_be_written_is_an_error_and_is_tried_again_next_turn() {
+    let (mut mine, _r) = pair(1);
+    mine.put("only", 1.0, &json!(1)).unwrap();          // no slot left for the ack cell
+    let (mut theirs_w, theirs) = pair(4);
+    theirs_w.put("a", 1.0, &json!(1)).unwrap(); theirs_w.mark("a", 2.0, CellState::Gone, "").unwrap();
+    let mut rec = Reclaim::new();
+    let seen = Reclaim::before(&theirs);
+    assert!(rec.after(seen, &theirs, &mut mine, SPINS, DEPTH).unwrap_err().contains("full"));
+    assert_eq!(rec.acked(), 0, "nothing was acknowledged");
+    assert!(rec.after(seen, &theirs, &mut mine, SPINS, DEPTH).is_err(), "it tries again");
+}
