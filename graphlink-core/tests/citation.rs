@@ -36,3 +36,16 @@ fn a_version_in_the_citation_file_is_the_crates_version() {
     assert_eq!(v, crate_v);
     assert!(field(&c, "date-released").is_some(), "a version comes with its date");
 }
+
+/// The DOI Zenodo gave the project: the citation file names it (`doi`, and the concept and version DOIs under `identifiers`), and the README shows it as a badge
+/// near the top, linking to it.
+#[test]
+fn a_doi_in_the_citation_file_is_the_readmes_badge_and_is_listed_as_an_identifier() {
+    let c = read(&root().join("CITATION.cff"));
+    let Some(doi) = field(&c, "doi") else { return };
+    assert!(c.contains(&format!("value: \"{doi}\"")), "the concept DOI is also an identifier");
+    assert!(c.contains("description: \"Concept DOI"), "and says it is the concept DOI");
+    let readme = read(&root().join("README.md"));
+    let top: String = readme.lines().take(6).collect::<Vec<_>>().join("\n");
+    assert!(top.contains(&format!("[![DOI](https://zenodo.org/badge/DOI/{doi}.svg)](https://doi.org/{doi})")), "the badge is in the first lines of the README: {top}");
+}
