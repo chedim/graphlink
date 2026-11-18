@@ -146,14 +146,14 @@ dependencies = [
 
 [[package]]
 name = "graphlink-auth"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "graphlink-bridge"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "graphlink-auth",
  "graphlink-core",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "graphlink-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "graphlink-auth",
  "graphlink-core",
@@ -174,14 +174,14 @@ dependencies = [
 
 [[package]]
 name = "graphlink-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "graphlink-net"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "graphlink-core",
  "rcgen",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "graphlink-shm"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "graphlink-core",
  "serde_json",
