@@ -39,6 +39,27 @@ The owner writes a slot like this: make its sequence number odd, write the cell,
 - **An owner that dies mid-write** leaves an odd number that never settles. The reader needs a rule for it (how long to retry, then treat the cell as `gone` or the link as closed); the time is a decision. The header's epoch tells a reader the owner restarted.
 - **An arena that fills:** values are appended and old ones are reclaimed by the owner when no slot points at them; the reader's check of "the slot did not change" covers a value that moved. The reclaim rule and the full-arena behaviour are decisions.
 
+## 4b. Reclaiming slots (design, not built)
+
+**The gap.** A slot is never reused: a key stays in its slot for the life of the table, and a node that goes away becomes `Gone` and keeps the slot (section 2: lookups stop at the first empty slot, so removing a key would hide the keys placed after it). A peer that creates short-lived nodes, one per request for example, fills its table and then every write fails with "the table is full". Nodes that live as long as the table (a lamp, a sensor) never meet this. Found by membrama, which writes a chat request per model turn; it works around the gap by reusing a few fixed node ids.
+
+**What a reader needs.** A reader learns that a node is gone from its `Gone` cell, or, after a rebuild, from the node's absence. It must never read a missing key as "still live", and it must not need to write anything (the reader's mapping is read-only on purpose, and there is no acknowledgement path from readers to the owner's table).
+
+**The design: the owner rebuilds the table in place, under a table-level seqlock, when it is full.**
+- The header gets two words: a `rebuild` counter (odd while the owner is rebuilding, even otherwise) and a `table_epoch` (raised by one at the end of each rebuild).
+- When a write needs a slot and the table is full, and some slots are `Gone`, the owner makes `rebuild` odd, collects the `Live` and `Refused` cells (key, revision, value), clears every slot, writes them back (the probe order changes, the revisions do not), raises `table_epoch`, and makes `rebuild` even. The write then goes ahead. If no slot is `Gone` the table is truly full and the write fails as it does now.
+- A reader reads `rebuild` before and after a lookup or scan and keeps the result only when both are equal and even (the slot seqlock of section 4, one level up); while the owner is rebuilding it retries, and after its spin limit it returns a distinct "rebuilding" error, never a wrong answer. The owner still never waits for a reader.
+- A reader remembers the `table_epoch` it last saw. When it sees a new one, it compares what it holds with what the table has: every key it held as live that the table no longer has is `Gone`. This is the same information the `Gone` cell carried, so a reader that missed a `Gone` cell loses nothing. A reader that has already reported a key as gone keeps that (the seat's reader keeps such a set today).
+- Revisions are unchanged by a rebuild, so a reader's "newer revision" rule still works.
+
+**Why this one.** Nothing is added to the control frames and nothing is written by a reader. It uses the single-owner, read-only-reader properties the table already has. It costs one pass over the table in the owner's thread, only when the table is full.
+
+**Not chosen.** (1) Recycling a `Gone` slot for a different key once every subscriber has seen it: needs an acknowledgement from each reader to the owner (a new frame op and per-reader bookkeeping) and a rule for a reader that dies. (2) A new table under a new name with a re-attach: every reader must re-attach and the old mapping stays live until it does. (3) Bigger tables: moves the wall. (4) Reusing fixed node ids, the membrama workaround: works, but only for a caller that knows to do it.
+
+**Work this needs, in order:** the owner side and a reader-side check in `graphlink-shm` with tests (a table filled with `Gone` cells keeps accepting new keys; a concurrent reader never sees a wrong answer); `CellsReader::table_epoch` and the reader rule; the same rule in the readers that use the table (cliffvm's peer driver, `graphlink-bridge`); a layout version bump (the header changes) so an old reader refuses a new table instead of misreading it.
+
+**Open, the owner's:** whether the rebuild is automatic when the table is full (the design above) or only on a call; the spin limit before a reader reports "rebuilding" (the reader already has `spins`); and whether an old reader may attach to a new table (the design says no).
+
 ## 5. Safety
 
 - The region is shared with another process, so every byte read is untrusted: bounds on every offset and length, a limit on the nesting of a value, and no allocation sized by a field in the region.
