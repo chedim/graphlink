@@ -1,5 +1,7 @@
 # graphlink
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24351364.svg)](https://doi.org/10.5281/zenodo.24351364)
+
 A library for **GraphLink**, the protocol that joins separate cliffhanger VMs into one graph: a backend seat and a page, a seat and a device, a seat and a driver process.
 It is the part of the protocol that needs no VM and no network; the VM ([cliffvm](https://github.com/chedim/babyseat)) and the transports are on the other side of it.
 
