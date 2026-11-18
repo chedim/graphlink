@@ -5,7 +5,7 @@
 A library for **GraphLink**, the protocol that joins separate cliffhanger VMs into one graph: a backend seat and a page, a seat and a device, a seat and a driver process.
 It is the part of the protocol that needs no VM and no network; the VM ([cliffvm](https://github.com/chedim/babyseat)) and the transports are on the other side of it.
 
-**Status: 0.1.2, published on crates.io** (`graphlink-core`, `-auth`, `-net`, `-shm`, `-bridge`, `-cli`). The protocol core, a TCP and a shared-memory transport, tokens, TLS and a bridge between a seat and a remote are built and tested; the cliffvm seat uses them (babyseat 0.7.63). What is not built is listed under "What is built". The design and its decisions are in the babyseat repo: `docs/graph-link.md` (the protocol and the seat's side, section 18) and `docs/waves.md` (how it meets the engine's rounds).
+**Status: 0.1.3, published on crates.io** (`graphlink-core`, `-auth`, `-net`, `-shm`, `-bridge`, `-cli`). The protocol core, a TCP and a shared-memory transport, tokens, TLS and a bridge between a seat and a remote are built and tested; the cliffvm seat uses them (babyseat 0.7.63). What is not built is listed under "What is built". The design and its decisions are in the babyseat repo: `docs/graph-link.md` (the protocol and the seat's side, section 18) and `docs/waves.md` (how it meets the engine's rounds).
 
 ## The idea
 
