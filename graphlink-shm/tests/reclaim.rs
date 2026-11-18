@@ -132,11 +132,16 @@ fn a_removal_counted_in_the_header_is_already_a_gone_cell_in_the_table() {
         for i in 0..3000 { let k = format!("k{i}"); w.put(&k, 1.0, &json!(i)).unwrap(); w.mark(&k, 2.0, CellState::Gone, "").unwrap(); }
         stop.store(true, Ordering::SeqCst);
     }) };
+    // a point lookup of the newest counted removals, as often as the reader can: a scan is too slow to land in the window between the count and the slot
+    let mut checks = 0u64;
     while !stop.load(Ordering::SeqCst) {
         let g = r.gone_seq();
-        let cells = r.scan("", SPINS, DEPTH).unwrap();
-        let gone_keys: std::collections::HashSet<&str> = cells.iter().filter(|(_, c)| c.state == CellState::Gone).map(|(k, _)| k.as_str()).collect();
-        for i in 0..g { assert!(gone_keys.contains(format!("k{i}").as_str()), "removal {} of {g} is counted but its cell is not Gone", i + 1); }
+        for i in g.saturating_sub(2)..g {
+            let c = r.get(&format!("k{i}"), SPINS, DEPTH).unwrap();
+            assert!(matches!(c, Some(ref c) if c.state == CellState::Gone), "removal {} of {g} is counted but its cell is {c:?}", i + 1);
+        }
+        checks += 1;
     }
+    assert!(checks > 10, "the reader ran only {checks} times");
     t.join().unwrap();
 }
