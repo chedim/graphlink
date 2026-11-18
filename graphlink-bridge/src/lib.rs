@@ -28,7 +28,7 @@ use graphlink_core::frame::{Frame, Op, Target, ValBody, VERSION};
 use graphlink_core::link::{Event, Link, Me};
 use graphlink_core::transport::Transport;
 use graphlink_net::{Listener, Tcp};
-use graphlink_shm::cells::{Cells, CellsReader, CellState};
+use graphlink_shm::cells::{Cells, CellsReader, CellState, Reclaim};
 use graphlink_shm::Shm;
 use serde_json::{json, Value as J};
 
@@ -338,7 +338,7 @@ pub fn run() {
     graphlink_shm::remove_region(&format!("/gl-{}-pc", cfg.peer)).unwrap_or_else(|e| fail(&format!("cannot clear the old cell table: {e}")));
     let cells = Cells::create(format!("/gl-{}-pc", cfg.peer), cfg.slots, cfg.key_cap, cfg.val_cap, cfg.epoch).unwrap_or_else(|e| fail(&format!("cannot make the cell table: {e}")));
     let mut table = Published { cells, last: BTreeMap::new(), pending: BTreeMap::new() };
-    let (mut acked, mut ack_failed) = (0u64, false);
+    let (mut reclaim, mut ack_failed) = (Reclaim::new(), false);
     let reader = CellsReader::attach(format!("/gl-{}-sc", cfg.peer)).unwrap_or_else(|e| fail(&format!("cannot attach the seat's cell table: {e}")));
     let mut subs = Subs::default();
     let mut seat = Link::new(me(&remote_ns, false));
@@ -379,12 +379,9 @@ pub fn run() {
         if tcp.is_closed() { done = true; }
         // reclaiming slots (docs/shared-memory.md, section 4b): read the count of the seat's removals BEFORE the pass that reads what the remote subscribed to, and
         // say it has been seen after; and give this table's Gone slots the seat has acknowledged to the cells that wait for one
-        let seen = reader.gone_seq();
+        let seen = Reclaim::before(&reader);
         subs.relay(&reader, cfg.spins, cfg.depth, &wire, &mut to_remote);
-        if seen != acked {
-            match table.cells.ack_seen(seen) { Ok(()) => acked = seen, Err(e) => if !ack_failed { ack_failed = true; eprintln!("graphlink-bridge: cannot acknowledge the seat's removals: {e}"); } }
-        }
-        table.cells.reuse_gone_up_to(reader.peer_ack(cfg.spins, cfg.depth).unwrap_or(0));
+        if let Err(e) = reclaim.after(seen, &reader, &mut table.cells, cfg.spins, cfg.depth) { if !ack_failed { ack_failed = true; eprintln!("graphlink-bridge: reclaiming slots: {e}"); } }
         if !table.pending.is_empty() { table.retry(); }
         if !to_remote.is_empty() { if let Ok(f) = remote.send(std::mem::take(&mut to_remote)) { let _ = tcp.send(&f); } }
         if !to_seat.is_empty() { if let Ok(f) = seat.send(std::mem::take(&mut to_seat)) { let _ = ctl.send(&f); } }
