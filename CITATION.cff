@@ -6,6 +6,14 @@ authors:
   - given-names: "Dmitrii O."
     family-names: "Chechetkin"
 repository-code: "https://github.com/chedim/graphlink"
+doi: "10.5281/zenodo.24351364"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.24351364"
+    description: "Concept DOI: all versions, resolves to the newest"
+  - type: doi
+    value: "10.5281/zenodo.24351365"
+    description: "Version DOI of 0.1.2"
 license: MIT
 abstract: >-
   graphlink is a protocol for linking graphs that live in different processes or
