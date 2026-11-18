@@ -290,3 +290,28 @@ impl Drop for CellsReader {
     fn drop(&mut self) { unmap(self.v.base, self.len); }
 }
 
+
+/// One end's bookkeeping for reclaiming slots (docs/shared-memory.md, section 4b). Each end of a link is both a reader (of the other's table) and an owner (of its own), and each turn
+/// does the two halves with the same order every time: read the count of the other table's removals BEFORE the pass that reads it, say AFTER the pass that they have been seen, and give
+/// the slots the other end has acknowledged to new keys. Every consumer of the tables does this, so it lives here.
+#[derive(Debug, Default)]
+pub struct Reclaim { acked: u64 }
+
+impl Reclaim {
+    pub fn new() -> Reclaim { Reclaim::default() }
+    /// The count to carry through the pass: call it before reading the other table.
+    pub fn before(theirs: &CellsReader) -> u64 { theirs.gone_seq() }
+    /// Call it after the pass that read `theirs`, with what `before` returned. It says in `mine` (this end's own table) that every removal up to `seen` has been seen, when that
+    /// is news, and lets `mine` give the `Gone` slots the other end has acknowledged to new keys. If the acknowledgement cannot be written (this table has no slot left for it) the
+    /// error is returned and nothing is counted as acknowledged, so the next turn tries again; the reuse is applied in any case.
+    pub fn after(&mut self, seen: u64, theirs: &CellsReader, mine: &mut Cells, spins: u64, depth: usize) -> Result<(), String> {
+        mine.reuse_gone_up_to(theirs.peer_ack(spins, depth)?);
+        if seen != self.acked {
+            mine.ack_seen(seen)?;
+            self.acked = seen;
+        }
+        Ok(())
+    }
+    /// The count this end has acknowledged so far.
+    pub fn acked(&self) -> u64 { self.acked }
+}

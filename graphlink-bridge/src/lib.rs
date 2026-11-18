@@ -28,7 +28,7 @@ use graphlink_core::frame::{Frame, Op, Target, ValBody, VERSION};
 use graphlink_core::link::{Event, Link, Me};
 use graphlink_core::transport::Transport;
 use graphlink_net::{Listener, Tcp};
-use graphlink_shm::cells::{Cells, CellsReader, CellState};
+use graphlink_shm::cells::{Cells, CellsReader, CellState, Reclaim};
 use graphlink_shm::Shm;
 use serde_json::{json, Value as J};
 
@@ -96,7 +96,7 @@ fn nap() {
 }
 
 /// the remote's cell table as the seat reads it: one cell per prop and one for the node (`<id>` U+0001 `<prop>`, the node's own with an empty prop)
-struct Published { cells: Cells, last: BTreeMap<String, (f64, J, CellState)> }
+struct Published { cells: Cells, last: BTreeMap<String, (f64, J, CellState)>, pending: BTreeMap<String, (f64, J, CellState)> }
 
 impl Published {
     fn put(&mut self, key: String, rev: f64, state: CellState, value: J) {
@@ -110,9 +110,20 @@ impl Published {
         };
         if let Err(why) = wrote {
             // a value that does not fit its slot becomes a cell that says so, never an old value left in place
-            if self.cells.mark(&key, rev, CellState::Refused, &why).is_err() { eprintln!("graphlink-bridge: cannot publish {key:?}: {why}"); }
+            if self.cells.mark(&key, rev, CellState::Refused, &why).is_err() {
+                // not even that fits (the table is full): keep the cell to try again once the seat has acknowledged removals and slots are freed
+                if !self.pending.contains_key(&key) { eprintln!("graphlink-bridge: cannot publish {key:?} yet: {why}"); }
+                self.pending.insert(key, (rev, value, state));
+                return;
+            }
         }
+        self.pending.remove(&key);
         self.last.insert(key, (rev, value, state));
+    }
+
+    /// Try again the cells that did not fit.
+    fn retry(&mut self) {
+        for (key, (rev, value, state)) in std::mem::take(&mut self.pending) { self.put(key, rev, state, value); }
     }
 
     fn val(&mut self, id: &str, r: f64, body: ValBody) {
@@ -326,7 +337,8 @@ pub fn run() {
     // this name is the bridge's own: what a bridge that was killed left under it is removed first
     graphlink_shm::remove_region(&format!("/gl-{}-pc", cfg.peer)).unwrap_or_else(|e| fail(&format!("cannot clear the old cell table: {e}")));
     let cells = Cells::create(format!("/gl-{}-pc", cfg.peer), cfg.slots, cfg.key_cap, cfg.val_cap, cfg.epoch).unwrap_or_else(|e| fail(&format!("cannot make the cell table: {e}")));
-    let mut table = Published { cells, last: BTreeMap::new() };
+    let mut table = Published { cells, last: BTreeMap::new(), pending: BTreeMap::new() };
+    let (mut reclaim, mut ack_failed) = (Reclaim::new(), false);
     let reader = CellsReader::attach(format!("/gl-{}-sc", cfg.peer)).unwrap_or_else(|e| fail(&format!("cannot attach the seat's cell table: {e}")));
     let mut subs = Subs::default();
     let mut seat = Link::new(me(&remote_ns, false));
@@ -365,7 +377,12 @@ pub fn run() {
             if from_remote(events, &remote_ns, &wire, &mut table, &mut subs, &mut to_seat, &mut to_remote) { done = true; }
         }
         if tcp.is_closed() { done = true; }
+        // reclaiming slots (docs/shared-memory.md, section 4b): read the count of the seat's removals BEFORE the pass that reads what the remote subscribed to, and
+        // say it has been seen after; and give this table's Gone slots the seat has acknowledged to the cells that wait for one
+        let seen = Reclaim::before(&reader);
         subs.relay(&reader, cfg.spins, cfg.depth, &wire, &mut to_remote);
+        if let Err(e) = reclaim.after(seen, &reader, &mut table.cells, cfg.spins, cfg.depth) { if !ack_failed { ack_failed = true; eprintln!("graphlink-bridge: reclaiming slots: {e}"); } }
+        if !table.pending.is_empty() { table.retry(); }
         if !to_remote.is_empty() { if let Ok(f) = remote.send(std::mem::take(&mut to_remote)) { let _ = tcp.send(&f); } }
         if !to_seat.is_empty() { if let Ok(f) = seat.send(std::mem::take(&mut to_seat)) { let _ = ctl.send(&f); } }
         if !done { nap(); }

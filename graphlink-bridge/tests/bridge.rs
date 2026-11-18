@@ -50,7 +50,7 @@ fn serve_with(extra: &[&str]) -> Serve {
 }
 
 /// the seat's end: the control rings and the seat's cell table made, a Link as the initiator, and the bridge's cell table to read once the bridge has made it
-struct Seat { _names: Names, name: String, ctl: Shm, _sc: Cells, link: Link, events: Vec<Event>, bridge: Option<Kill>, pc: Option<CellsReader> }
+struct Seat { _names: Names, name: String, ctl: Shm, sc: Cells, link: Link, events: Vec<Event>, bridge: Option<Kill>, pc: Option<CellsReader> }
 impl Seat {
     fn start(remote: &Serve) -> Seat { Seat::start_with(remote, &[]) }
     fn start_with(remote: &Serve, extra: &[&str]) -> Seat {
@@ -63,7 +63,7 @@ impl Seat {
         let bridge = Command::new(BRIDGE)
             .args(["connect", &remote.addr, "--peer", &name, "--slots", "64", "--key-cap", "128", "--val-cap", "1024", "--epoch", "1", "--spins", &SPINS.to_string(), "--depth", &DEPTH.to_string()]).args(extra)
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
-        Seat { _names: names, name, ctl, _sc: sc, link, events: vec![], bridge: Some(Kill(bridge)), pc: None }
+        Seat { _names: names, name, ctl, sc, link, events: vec![], bridge: Some(Kill(bridge)), pc: None }
     }
     /// the bridge listens (loopback, an ephemeral port); returns the seat and the address it prints
     fn start_listening() -> (Seat, String) { Seat::start_listening_with(&[]) }
@@ -80,7 +80,7 @@ impl Seat {
         let mut line = String::new();
         BufReader::new(bridge.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
         let addr = line.trim().strip_prefix("listening ").unwrap_or_else(|| panic!("the first line was {line:?}")).to_string();
-        (Seat { _names: names, name, ctl, _sc: sc, link, events: vec![], bridge: Some(Kill(bridge)), pc: None }, addr)
+        (Seat { _names: names, name, ctl, sc, link, events: vec![], bridge: Some(Kill(bridge)), pc: None }, addr)
     }
     fn send(&mut self, ops: Vec<Op>) { let f = self.link.send(ops).expect("link open"); self.ctl.send(&f).unwrap(); }
     fn until(&mut self, ms: u64, done: impl Fn(&mut Seat) -> bool) -> bool {
@@ -227,13 +227,13 @@ fn a_remote_that_connects_to_a_listening_bridge_subscribes_to_a_seat_node_and_ge
     let (_w, lines) = watch(&addr, &["membrane::Lamp:1"]);
     // the bridge passes the subscription to the seat, which answers it by writing cells
     assert!(seat.until(10000, |s| s.ops().iter().any(|o| matches!(o, Op::Sub { target: Target::Id(i), .. } if i == "membrane::Lamp:1"))), "the seat never saw the subscription: {}", seat.stderr());
-    let sc = &mut seat._sc;
+    let sc = &mut seat.sc;
     sc.put("membrane::Lamp:1\u{1}", 1.0, &json!(true)).unwrap();
     sc.put("membrane::Lamp:1\u{1}power", 1.0, &json!("off")).unwrap();
     let first = line_with(&lines, 10000, |j| j["props"]["power"] == json!("off")).expect("the remote never got the value");
     assert_eq!(first["id"], json!("membrane::Lamp:1"));
     // a change of a cell reaches the remote as a new value
-    seat._sc.put("membrane::Lamp:1\u{1}power", 2.0, &json!("on")).unwrap();
+    seat.sc.put("membrane::Lamp:1\u{1}power", 2.0, &json!("on")).unwrap();
     assert!(line_with(&lines, 10000, |j| j["props"]["power"] == json!("on")).is_some(), "the changed value never reached the remote");
 }
 
@@ -242,7 +242,7 @@ fn a_gone_cell_reaches_the_remote_as_gone() {
     let (mut seat, addr) = Seat::start_listening();
     let (_w, lines) = watch(&addr, &["membrane::Lamp:2"]);
     assert!(seat.until(10000, |s| s.ops().iter().any(|o| matches!(o, Op::Sub { .. }))));
-    seat._sc.mark("membrane::Lamp:2\u{1}", 1.0, CellState::Gone, "").unwrap();
+    seat.sc.mark("membrane::Lamp:2\u{1}", 1.0, CellState::Gone, "").unwrap();
     assert!(line_with(&lines, 10000, |j| j["gone"] == json!(true)).is_some(), "the remote was never told the node is gone");
 }
 
@@ -497,8 +497,8 @@ fn with_a_seat_name_the_bridge_says_it_to_the_remote_and_the_remote_reads_the_se
     assert!(seat.until(10000, |s| s.ops().iter().any(|o| matches!(o, Op::Sub { target: Target::Id(i), .. } if i == "Lamp:desk"))), "the seat was never asked for its bare id: {:?}", seat.ops());
     assert!(!seat.ops().iter().any(|o| matches!(o, Op::Sub { target: Target::Id(i), .. } if i.contains("Door"))));
     // the seat answers with cells under its bare id; the remote gets the value under the name
-    seat._sc.put("Lamp:desk\u{1}", 1.0, &json!(true)).unwrap();
-    seat._sc.put("Lamp:desk\u{1}power", 1.0, &json!("off")).unwrap();
+    seat.sc.put("Lamp:desk\u{1}", 1.0, &json!(true)).unwrap();
+    seat.sc.put("Lamp:desk\u{1}power", 1.0, &json!("off")).unwrap();
     let mut got: Option<Frame> = None;
     let end = Instant::now() + Duration::from_secs(10);
     while Instant::now() < end && got.is_none() {
@@ -530,4 +530,35 @@ fn with_a_seat_name_a_bare_id_from_the_remote_is_refused() {
     let o = Command::new(cli_bin()).args(["write", &addr, "Lamp:desk", "power", "\"on\""]).stdout(Stdio::piped()).output().unwrap();
     assert!(String::from_utf8_lossy(&o.stdout).starts_with("refused:"), "{}", String::from_utf8_lossy(&o.stdout));
     assert!(!seat.ops().iter().any(|o| matches!(o, Op::Wr { .. })));
+}
+
+// ---- reclaiming slots (docs/shared-memory.md, section 4b): the bridge acknowledges the seat's removals, and reuses its own Gone slots once the seat has acknowledged them
+
+#[test]
+fn the_bridge_says_which_removals_of_the_seats_table_it_has_seen() {
+    let remote = serve();
+    let mut seat = Seat::start(&remote);
+    assert!(seat.until(10000, opened));
+    for i in 0..3 { let k = key(&format!("membrane::Lamp:l{i}"), "power"); seat.sc.put(&k, 1.0, &json!("on")).unwrap(); seat.sc.mark(&k, 2.0, CellState::Gone, "").unwrap(); }
+    let acked = |s: &mut Seat| s.pc.as_ref().map_or(false, |p| p.peer_ack(SPINS, DEPTH).unwrap_or(0) == 3);
+    assert!(seat.until(10000, acked), "the seat removed three cells, the bridge should say it has seen them\n{}", seat.stderr());
+}
+
+#[test]
+fn a_full_table_takes_the_cells_that_did_not_fit_once_the_seat_has_acknowledged_the_gone_ones() {
+    let remote = serve();
+    let mut seat = Seat::start_with(&remote, &["--slots", "4"]);
+    assert!(seat.until(10000, opened));
+    let gone = |s: &Seat, id: &str| s.pc.as_ref().and_then(|p| p.get(&key(id, ""), SPINS, DEPTH).ok().flatten()).map_or(false, |c| c.state == CellState::Gone);
+    // four nodes the remote does not have fill the four slots with Gone cells
+    for i in 0..4 { seat.send(vec![Op::Read { id: format!("kitchen::Lamp:n{i}"), props: vec![], rid: format!("r{i}") }]); }
+    assert!(seat.until(10000, |s| (0..4).all(|i| gone(s, &format!("kitchen::Lamp:n{i}")))), "{}", seat.stderr());
+    // a fifth does not fit: no cell for it (and the bridge keeps it to try again)
+    seat.send(vec![Op::Read { id: "kitchen::Lamp:n4".into(), props: vec![], rid: "r4".into() }]);
+    assert!(!seat.until(1500, |s| gone(s, "kitchen::Lamp:n4")), "the table is full and nothing was acknowledged");
+    // the seat has read the four removals: it says so in its own table
+    let g = seat.pc.as_ref().unwrap().gone_seq();
+    assert_eq!(g, 4);
+    seat.sc.ack_seen(g).unwrap();
+    assert!(seat.until(10000, |s| gone(s, "kitchen::Lamp:n4")), "after the acknowledgement the fifth takes a freed slot\n{}", seat.stderr());
 }
