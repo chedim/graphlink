@@ -1,5 +1,5 @@
 [workspace]
-members = ["graphlink-core", "graphlink-net", "graphlink-cli", "graphlink-shm", "graphlink-bridge", "graphlink-auth"]
+members = ["graphlink-core", "graphlink-net", "graphlink-cli", "graphlink-shm", "graphlink-bridge", "graphlink-auth", "graphlink-claude"]
 resolver = "2"
 
 # One version for every crate: a release publishes them all at that version (the tag is `v<version>`: .github/workflows/publish.yml)
