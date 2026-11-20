@@ -52,3 +52,23 @@ All required on the command line, no default: `--slots`, `--key-cap`, `--val-cap
 - That a live `result` line, the usage fields and the `is_error` shape are what the fake prints.
 - That a SIGTERM to the child ends its MCP server too (the shim also ends when its stdin or the socket closes).
 - A socket path over 100 bytes (a long `TMPDIR`) is refused with a message.
+
+
+## The models it serves
+
+Once the link is open the peer publishes ONE node of its own, `<ns>::Models:main`:
+
+- `names` = `["claude", "sonnet", "opus", "haiku"]`: the models it answers;
+- `backend` = `"claude-peer"`: what a seat files them under.
+
+A seat that reads this node routes those names to the peer while its link is up, with no `cloud_models` entry per model (membrane: `packs/chat_membrama.c1f`, `mb_entry`).
+
+A request names its model as `membrane::LlmRequest:<rid>.model` (round 1 decides; later rounds continue the same child):
+
+| `model` | the child runs with |
+|---|---|
+| none, or `claude` | `--model <the owner's --model>` (as before this field existed) |
+| `sonnet`, `opus`, `haiku` | `--model <that alias>` |
+| anything else | nothing starts; the reply is `error`: `this peer does not serve the model <m>: it serves claude, sonnet, opus, haiku` |
+
+Tests: `graphlink-claude/tests/models.rs` (the fake CLI, not the real one).

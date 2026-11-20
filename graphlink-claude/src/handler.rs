@@ -14,6 +14,11 @@ use std::time::{Duration, Instant};
 const REQUEST: &str = "membrane::LlmRequest:";
 const MSG: &str = "membrane::LlmMsg:";
 const TOOL: &str = "membrane::LlmTool:";
+/// The models this peer serves, published on `<ns>::Models:main` (`names`, `backend`) so a seat routes these names here without a `cloud_models` entry: `claude` is the
+/// owner's `--model` (what a request with no model runs too), the others are the CLI's own aliases, handed to it as `--model <alias>`.
+pub const MODELS: [&str; 4] = ["claude", "sonnet", "opus", "haiku"];
+/// The backend a seat files these models under (its `cloud_models` name for a Claude Code peer).
+pub const BACKEND: &str = "claude-peer";
 /// The header of a CBOR text string of 256 to 65535 bytes: a cell's value cap holds the whole item, so a chunk is `val_cap` minus this.
 const CBOR_TEXT_HEADER: usize = 3;
 /// The seat reads a reply of up to four chunks (packs/chat_membrama.c1f, `chunks_in`).
@@ -81,10 +86,21 @@ pub struct Handler {
     active: HashMap<String, Active>,
     dying: Vec<Dying>,
     reclaim_warned: bool,
+    /// the models node is published (once the link is open)
+    announced: bool,
 }
 
-struct Req { rid: String, mid: String, n: u32, system: String, user: Option<String>, specs: Vec<J>, results: Vec<String> }
+struct Req { rid: String, mid: String, n: u32, model: Option<String>, system: String, user: Option<String>, specs: Vec<J>, results: Vec<String> }
 enum Read { Wait, Aborted, Failed(String), Ready(Req) }
+
+/// The alias the CLI runs for the model a request names: none or `claude` is the owner's `--model`; another of `MODELS` is itself; anything else is refused.
+pub fn alias(owners: &str, asked: Option<&str>) -> Result<String, String> {
+    match asked {
+        None | Some("claude") => Ok(owners.to_string()),
+        Some(m) if MODELS.contains(&m) => Ok(m.to_string()),
+        Some(m) => Err(format!("this peer does not serve the model {m}: it serves {}", MODELS.join(", "))),
+    }
+}
 
 fn truthy(v: Option<&J>) -> bool { matches!(v, Some(J::Bool(true))) }
 fn refusal(eid: &str, prop: &str, why: &str) -> String {
@@ -117,16 +133,17 @@ fn read_request(peer: &Peer, eid: &str, rid: &str) -> Result<Read, String> {
     if let Some(ids) = maybe!(peer, eid, "tools") {
         for tid in ids.as_array().into_iter().flatten().filter_map(J::as_str) { specs.push(need!(peer, tid, "spec")); }
     }
+    let model = match maybe!(peer, eid, "model") { None | Some(J::Null) => None, Some(J::String(m)) => Some(m), Some(other) => return Ok(Read::Failed(format!("{eid} model: it must be a string, not {other}"))) };
     let system = msgs.iter().filter(|(r, _)| r == "system").map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n\n");
     let user = msgs.iter().rev().find(|(r, _)| r == "user").map(|(_, t)| t.clone());
     let mut results: Vec<String> = msgs.iter().rev().take_while(|(r, _)| r == "tool").map(|(_, t)| t.clone()).collect();
     results.reverse();
-    Ok(Read::Ready(Req { rid: rid.to_string(), mid, n, system, user, specs, results }))
+    Ok(Read::Ready(Req { rid: rid.to_string(), mid, n, model, system, user, specs, results }))
 }
 
 impl Handler {
     pub fn new(cfg: Config) -> Handler {
-        Handler { cfg, subscribed: false, started: HashSet::new(), finished: HashMap::new(), active: HashMap::new(), dying: Vec::new(), reclaim_warned: false }
+        Handler { cfg, subscribed: false, started: HashSet::new(), finished: HashMap::new(), active: HashMap::new(), dying: Vec::new(), reclaim_warned: false, announced: false }
     }
 
     fn reply(&self, rid: &str) -> String { format!("{}::Reply:{rid}", self.cfg.ns) }
@@ -143,6 +160,12 @@ impl Handler {
         if !self.subscribed && peer.is_open() {
             for p in [REQUEST, MSG, TOOL] { peer.subscribe(Target::Prefix(p.into()), None)?; }
             self.subscribed = true;
+        }
+        if !self.announced && peer.is_open() {
+            let node = format!("{}::Models:main", self.cfg.ns);
+            peer.publish(&node, "names", &json!(MODELS))?;
+            peer.publish(&node, "backend", &json!(BACKEND))?;
+            self.announced = true;
         }
         let ids: BTreeMap<String, String> = peer.scan(REQUEST)?.into_iter().map(|(eid, _, _)| { let id = eid[REQUEST.len()..].to_string(); (eid, id) }).collect();
         // a request the seat retired: its reply and chunks are retired, and a run waiting on it is ended
@@ -182,7 +205,9 @@ impl Handler {
         if req.n == 1 {
             if self.active.contains_key(&req.mid) { return Err(format!("the turn {} already has a run", req.mid)); }
             let Some(user) = req.user.clone() else { return Err("the first round has no user message".into()) };
-            let session = Session::spawn(&self.cfg, &req.system, &user, req.specs.clone())?;
+            let mut cfg = self.cfg.clone();
+            cfg.model = alias(&self.cfg.model, req.model.as_deref())?;
+            let session = Session::spawn(&cfg, &req.system, &user, req.specs.clone())?;
             self.start_round(peer, &req.rid)?;
             self.active.insert(req.mid.clone(), Active { session, req: eid.to_string(), round: Round::new(1, req.rid.clone()), held: Vec::new(), calls: Vec::new(), tool_uses: HashSet::new(), awaiting: false, closed: 0, tail: String::new() });
             return Ok(());
