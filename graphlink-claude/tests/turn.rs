@@ -19,8 +19,17 @@ fn a_plain_answer_is_one_round_with_text_finish_stop_and_usage() {
     let r = rig.seat.reader();
     assert_eq!(text(&r, "c/p1-1"), "hello from claude");
     assert_eq!(cell(&r, "claude::Reply:c/p1-1", "finish"), Some(json!("stop")));
-    assert_eq!(cell(&r, "claude::Reply:c/p1-1", "usage"), Some(json!({"read": 5, "loaded": 0, "generated": 7})));
+    assert_eq!(cell(&r, "claude::Reply:c/p1-1", "usage"), Some(json!({"read": 5, "generated": 7})));
     assert_eq!(cell(&r, "claude::Reply:c/p1-1", "tool_calls"), None);
+}
+
+#[test]
+fn usage_maps_the_token_counts_onto_read_loaded_generated_and_leaves_out_what_is_not_there() {
+    let mut rig = Rig::new("u1");
+    rig.seat.round1("c/u1", "cache u1", &["echo"]);
+    rig.until_state("c/u1-1", "done");
+    // read: tokens read fresh (input + written to the prompt cache); loaded: tokens served from the prompt cache; generated: output tokens
+    assert_eq!(cell(&rig.seat.reader(), "claude::Reply:c/u1-1", "usage"), Some(json!({"read": 7, "loaded": 50, "generated": 2})));
 }
 
 #[test]
@@ -60,8 +69,7 @@ fn a_tool_call_ends_the_round_and_the_next_request_carries_the_result_into_the_s
     let r = rig.seat.reader();
     assert_eq!(text(&r, "c/t1-2"), "got: PONG [tools: echo]", "the child continued with the result as the tool's result");
     assert_eq!(cell(&r, "claude::Reply:c/t1-2", "finish"), Some(json!("stop")));
-    assert_eq!(cell(&r, "claude::Reply:c/t1-2", "usage"), Some(json!({"read": 11, "loaded": 0, "generated": 13})));
-    assert_eq!(logged("t1")["argv"].as_array().unwrap().len(), logged("t1")["argv"].as_array().unwrap().len());
+    assert_eq!(cell(&r, "claude::Reply:c/t1-2", "usage"), Some(json!({"read": 11, "generated": 13})));
 }
 
 #[test]
@@ -100,7 +108,8 @@ fn a_second_round_with_the_wrong_number_of_results_is_an_error() {
 #[test]
 fn a_later_round_with_no_run_for_the_turn_is_an_error_not_a_guess() {
     let mut rig = Rig::new("n1");
-    rig.seat.round1("c/n1", "plain n1", &["echo"]);
+    // the peer never saw round 1 (it was restarted): only round 2 is there
+    rig.seat.msg("c/n1", 0, "system", "S"); rig.seat.msg("c/n1", 1, "user", "plain n1"); rig.seat.tools(&["echo"]);
     rig.seat.assistant_calls("c/n1", 2, json!([]));
     rig.seat.msg("c/n1", 3, "tool", "r");
     rig.seat.request("c/n1", 2, 4, 1);

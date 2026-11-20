@@ -3,3 +3,4 @@ pub mod cli;
 pub mod handler;
 pub mod mcp;
 pub mod peer;
+pub mod session;

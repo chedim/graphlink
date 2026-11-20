@@ -22,8 +22,8 @@ if d and tag:
 def emit(o):
     print(json.dumps(o), flush=True)
 
-def assistant(blocks, mid, out=7):
-    emit({"type": "assistant", "message": {"id": mid, "role": "assistant", "content": blocks, "usage": {"input_tokens": 5, "output_tokens": out}}})
+def assistant(blocks, mid, usage=(5, 7)):
+    emit({"type": "assistant", "message": {"id": mid, "role": "assistant", "content": blocks, "usage": {"input_tokens": usage[0], "output_tokens": usage[1]}}})
 
 def result(text, usage=(5, 7), err=False):
     emit({"type": "result", "subtype": "error_during_execution" if err else "success", "is_error": err, "result": text, "usage": {"input_tokens": usage[0], "output_tokens": usage[1]}})
@@ -60,8 +60,8 @@ elif mode == "tool":
     s.send("tools/call", {"name": "echo", "arguments": {"text": "ping"}})
     r = s.recv()["result"]["content"][0]["text"]
     emit({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu1", "content": r}]}})
-    assistant([{"type": "text", "text": "got: " + r + " [tools: " + ",".join(tools) + "]"}], "m2")
-    result("got: " + r, usage=(11, 13))
+    assistant([{"type": "text", "text": "got: " + r + " [tools: " + ",".join(tools) + "]"}], "m2", usage=(11, 13))
+    result("got: " + r, usage=(99, 99))
 elif mode == "two":
     s, tools = start()
     assistant([{"type": "tool_use", "id": "tu1", "name": "mcp__seat__echo", "input": {"text": "a"}}, {"type": "tool_use", "id": "tu2", "name": "mcp__seat__other", "input": {"n": 2}}], "m1")
@@ -83,6 +83,9 @@ elif mode == "fail":
     sys.stderr.write("boom: no auth\n"); sys.exit(3)
 elif mode == "keyleak":
     sys.stderr.write("rejected key " + os.environ.get("ANTHROPIC_API_KEY", "") + "\n"); sys.exit(1)
+elif mode == "cache":
+    emit({"type": "assistant", "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": "cached"}], "usage": {"input_tokens": 3, "cache_creation_input_tokens": 4, "cache_read_input_tokens": 50, "output_tokens": 2}}})
+    result("cached")
 elif mode == "iserror":
     result("the model said no", err=True)
 elif mode == "long":

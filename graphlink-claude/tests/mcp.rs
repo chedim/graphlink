@@ -60,6 +60,7 @@ fn the_shim_speaks_mcp_lists_the_tools_and_holds_a_call_until_it_is_answered() {
     ask(json!({"jsonrpc": "2.0", "id": 5, "method": "nothing/known"}));
     assert_eq!(read()["error"]["code"], json!(-32601));
     drop(ask);
+    drop(stdin);
     let _ = child.wait();   // stdin closed: the shim ends
     let _ = std::fs::remove_dir_all(dir);
 }
