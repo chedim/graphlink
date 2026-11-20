@@ -1,0 +1,23 @@
+[package]
+name = "graphlink-openai"
+version.workspace = true
+edition.workspace = true
+description = "graphlink-openai: any OpenAI-compatible chat completions server as a model backend for a GraphLink seat, joined over shared memory"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "graphlink-openai"
+path = "src/main.rs"
+
+[dependencies]
+graphlink-core = { workspace = true }
+graphlink-shm = { workspace = true }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+libc = "0.2"
