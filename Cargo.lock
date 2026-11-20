@@ -145,6 +145,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "graphlink-anthropic"
+version = "0.1.3"
+dependencies = [
+ "graphlink-core",
+ "graphlink-shm",
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "graphlink-auth"
 version = "0.1.3"
 dependencies = [
