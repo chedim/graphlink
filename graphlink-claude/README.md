@@ -9,7 +9,7 @@ graphlink-claude serve --peer <name> --ns <namespace> --claude-bin <path> --mode
 graphlink-claude mcp --socket <path>        # spawned by Claude Code, not by hand
 ```
 
-Every number is the owner's and has no default; `--model`, `--claude-bin`, `--peer` and `--ns` are required too. The numbers of the regions must equal what the seat's `peers` fact declares. The full page, what is verified and what is not: [docs/claude-peer.md](../docs/claude-peer.md).
+It publishes the models it serves on `<ns>::Models:main` (`names`: `claude`, `sonnet`, `opus`, `haiku`; `backend`: `claude-peer`), and runs each request with the model the request names (`membrane::LlmRequest:<rid>.model`; none or `claude` is `--model`). Every number is the owner's and has no default; `--model`, `--claude-bin`, `--peer` and `--ns` are required too. The numbers of the regions must equal what the seat's `peers` fact declares. The full page, what is verified and what is not: [docs/claude-peer.md](../docs/claude-peer.md).
 
 **Authentication.** The API key is the environment variable `ANTHROPIC_API_KEY` of this process (never an option, never in a cell, argv or log); without it `serve` refuses to start. The CLI's own login is used only with `--auth login`, never chosen silently.
 
