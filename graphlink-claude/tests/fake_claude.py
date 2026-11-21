@@ -65,11 +65,22 @@ elif mode == "tool":
 elif mode == "two":
     s, tools = start()
     assistant([{"type": "tool_use", "id": "tu1", "name": "mcp__seat__echo", "input": {"text": "a"}}, {"type": "tool_use", "id": "tu2", "name": "mcp__seat__other", "input": {"n": 2}}], "m1")
+    # the real CLI calls MCP tools ONE AT A TIME (measured: with two tool_use blocks in one message the second tools/call came only after the first was answered, with or without
+    # readOnlyHint): the first call, its result, then the second
+    s.send("tools/call", {"name": "echo", "arguments": {"text": "a"}}); r1 = s.recv()["result"]["content"][0]["text"]
+    s.send("tools/call", {"name": "other", "arguments": {"n": 2}}); r2 = s.recv()["result"]["content"][0]["text"]
+    assistant([{"type": "text", "text": "got: " + r1 + "|" + r2}], "m2")
+    result("done")
+elif mode == "twoat":
+    # a CLI that did call both at once (not the measured one): the second call arrives while the first is held
+    s, tools = start()
+    assistant([{"type": "tool_use", "id": "tu1", "name": "mcp__seat__echo", "input": {"text": "a"}}, {"type": "tool_use", "id": "tu2", "name": "mcp__seat__other", "input": {"n": 2}}], "m1")
     i1 = s.send("tools/call", {"name": "echo", "arguments": {"text": "a"}}); i2 = s.send("tools/call", {"name": "other", "arguments": {"n": 2}})
     got = {}
     for _ in range(2):
-        r = s.recv(); got[r["id"]] = r["result"]["content"][0]["text"]
-    assistant([{"type": "text", "text": "got: " + got[i1] + "|" + got[i2]}], "m2")
+        r = s.recv(); got[r["id"]] = r["result"]
+    t1 = got[i1]["content"][0]["text"]; t2 = got[i2]["content"][0]["text"]
+    assistant([{"type": "text", "text": "got: " + t1 + "|" + t2 + "|err=" + str(bool(got[i2].get("isError")))}], "m2")
     result("done")
 elif mode == "hang":
     assistant([{"type": "text", "text": "thinking"}], "m1")

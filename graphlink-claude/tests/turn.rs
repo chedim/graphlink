@@ -73,36 +73,58 @@ fn a_tool_call_ends_the_round_and_the_next_request_carries_the_result_into_the_s
 }
 
 #[test]
-fn several_calls_of_one_step_go_in_one_reply_and_each_result_reaches_its_call() {
+fn several_tool_uses_of_one_step_are_each_their_own_round_because_the_cli_calls_one_tool_at_a_time() {
+    // measured on the real CLI: with two tool_use blocks in one message the second call comes only after the first was answered. A peer that waited for both before ending the round
+    // waited for ever (turns that took 30 minutes on a seat): the round ends on the first held call, the seat runs it, and the second call is the next round's
     let mut rig = Rig::new("t2");
     rig.seat.round1("c/t2", "two t2", &["echo", "other"]);
     rig.until_state("c/t2-1", "done");
     let r = rig.seat.reader();
     let calls = cell(&r, "claude::Reply:c/t2-1", "tool_calls").unwrap();
-    assert_eq!(calls.as_array().unwrap().len(), 2, "{calls}");
-    let names: Vec<&str> = calls.as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"echo") && names.contains(&"other"));
+    assert_eq!(calls.as_array().unwrap().len(), 1, "one call in round 1: {calls}");
+    assert_eq!(calls[0]["name"], "echo");
     rig.seat.assistant_calls("c/t2", 2, json!([]));
-    // the results in the order of the reply's calls
-    for (i, n) in names.iter().enumerate() { rig.seat.msg("c/t2", 3 + i, "tool", &format!("result-of-{n}")); }
-    rig.seat.request("c/t2", 2, 5, 2);
+    rig.seat.msg("c/t2", 3, "tool", "result-of-echo");
+    rig.seat.request("c/t2", 2, 4, 1);
     rig.until_state("c/t2-2", "done");
-    let said = text(&rig.seat.reader(), "c/t2-2");
-    let (a, b) = (names.iter().position(|n| *n == "echo").unwrap(), names.iter().position(|n| *n == "other").unwrap());
-    let want = format!("got: result-of-{}|result-of-{}", names[a], names[b]);
-    assert_eq!(said, want);
+    let r = rig.seat.reader();
+    let calls = cell(&r, "claude::Reply:c/t2-2", "tool_calls").unwrap();
+    assert_eq!(calls.as_array().unwrap().len(), 1, "one call in round 2: {calls}");
+    assert_eq!(calls[0]["name"], "other");
+    rig.seat.assistant_calls("c/t2", 4, json!([]));
+    rig.seat.msg("c/t2", 5, "tool", "result-of-other");
+    rig.seat.request("c/t2", 3, 6, 1);
+    rig.until_state("c/t2-3", "done");
+    assert_eq!(text(&rig.seat.reader(), "c/t2-3"), "got: result-of-echo|result-of-other");
+}
+
+#[test]
+fn a_cli_that_calls_two_tools_at_once_gets_an_error_for_the_second_and_can_call_it_again() {
+    // not the measured CLI, but a later one might: the call that comes while the round is over is answered at once with an error that says what to do, never held for ever
+    let mut rig = Rig::new("t4");
+    rig.seat.round1("c/t4", "twoat t4", &["echo", "other"]);
+    rig.until_state("c/t4-1", "done");
+    let calls = cell(&rig.seat.reader(), "claude::Reply:c/t4-1", "tool_calls").unwrap();
+    assert_eq!(calls.as_array().unwrap().len(), 1, "{calls}");
+    rig.seat.assistant_calls("c/t4", 2, json!([]));
+    rig.seat.msg("c/t4", 3, "tool", "result-of-echo");
+    rig.seat.request("c/t4", 2, 4, 1);
+    rig.until_state("c/t4-2", "done");
+    let said = text(&rig.seat.reader(), "c/t4-2");
+    assert!(said.starts_with("got: result-of-echo|") && said.ends_with("|err=True"), "the second call was answered with an error: {said}");
 }
 
 #[test]
 fn a_second_round_with_the_wrong_number_of_results_is_an_error() {
     let mut rig = Rig::new("t3");
-    rig.seat.round1("c/t3", "two t3", &["echo", "other"]);
+    rig.seat.round1("c/t3", "tool t3", &["echo"]);
     rig.until_state("c/t3-1", "done");
     rig.seat.assistant_calls("c/t3", 2, json!([]));
-    rig.seat.msg("c/t3", 3, "tool", "only one");
-    rig.seat.request("c/t3", 2, 4, 2);
+    rig.seat.msg("c/t3", 3, "tool", "one");
+    rig.seat.msg("c/t3", 4, "tool", "two");
+    rig.seat.request("c/t3", 2, 5, 1);
     rig.until_state("c/t3-2", "error");
-    assert!(cell(&rig.seat.reader(), "claude::Reply:c/t3-2", "error").unwrap().as_str().unwrap().contains("2"), "names the count of calls");
+    assert!(cell(&rig.seat.reader(), "claude::Reply:c/t3-2", "error").unwrap().as_str().unwrap().contains("2"), "names the count of results");
 }
 
 #[test]
