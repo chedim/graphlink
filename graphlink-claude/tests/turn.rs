@@ -110,8 +110,9 @@ fn a_cli_that_calls_two_tools_at_once_gets_an_error_for_the_second_and_can_call_
     rig.seat.msg("c/t4", 3, "tool", "result-of-echo");
     rig.seat.request("c/t4", 2, 4, 1);
     rig.until_state("c/t4-2", "done");
+    // which of the two calls reaches the peer first is not fixed (two threads of the shim): exactly one of them is held and gets the result, the other is answered at once with the error
     let said = text(&rig.seat.reader(), "c/t4-2");
-    assert!(said.starts_with("got: result-of-echo|") && said.ends_with("|err=True"), "the second call was answered with an error: {said}");
+    assert!(said.contains("result-of-") && said.contains("takes one tool call at a time") && said.ends_with("|errs=1"), "one call got the result, the other the error: {said}");
 }
 
 #[test]

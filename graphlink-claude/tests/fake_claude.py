@@ -80,7 +80,7 @@ elif mode == "twoat":
     for _ in range(2):
         r = s.recv(); got[r["id"]] = r["result"]
     t1 = got[i1]["content"][0]["text"]; t2 = got[i2]["content"][0]["text"]
-    assistant([{"type": "text", "text": "got: " + t1 + "|" + t2 + "|err=" + str(bool(got[i2].get("isError")))}], "m2")
+    assistant([{"type": "text", "text": "got: " + t1 + "|" + t2 + "|errs=" + str(int(bool(got[i1].get("isError"))) + int(bool(got[i2].get("isError"))))}], "m2")
     result("done")
 elif mode == "hang":
     assistant([{"type": "text", "text": "thinking"}], "m1")
