@@ -3,6 +3,8 @@
 //! the slot, the number again and keeps the slot only when both numbers are equal and even. The owner never waits for a reader. A value is ONE CBOR item (the JSON subset of
 //! `graphlink_core::cbor`). Slots have a fixed capacity for the key and the value, given when the table is made, so there is no allocator and nothing to reclaim: a value that does
 //! not fit is an error the owner sees, and the table has a fixed number of slots. Keys are never removed (a node that goes away becomes `Gone`), so a lookup stops at the first empty slot.
+//! A value larger than a slot is the owner's problem and not the caller's: it is stored as its JSON text cut into pieces, in more slots, and the reader gets it back whole (docs/shared-memory.md,
+//! section 4c). A value that fits a slot is stored exactly as before.
 //! Every byte a reader takes from the region is untrusted: lengths are checked against the capacities, and a bad slot is an error, never a panic or an out-of-bounds read.
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 
@@ -22,6 +24,11 @@ const H_VAL_CAP: usize = 28;
 const H_EPOCH: usize = 32;
 const H_CLOSED: usize = 40;
 const H_GONE: usize = 48;   // how many removals the owner has made (a Gone cell carries its number); raised AFTER the slot is written
+
+/// The text a spilled value's head cell carries (the head is the cell of the value's own key, in the `Refused` state, so a reader that does not know spills sees a refusal, as it saw a value that
+/// did not fit): `\u{2}spill\u{1}<generation in hex>\u{1}<bytes of the JSON text>\u{1}<number of pieces>`. The pieces are cells whose key starts with U+0002 (scans leave them out) and holds the
+/// generation, so the pieces of one write are never mixed with those of another: `\u{2}s<generation in hex>\u{1}<piece number>`, each value one CBOR text string.
+const SPILL_MARK: &str = "\u{2}spill\u{1}";
 
 /// The key of the cell in which a reader says how far it has seen the other table's removals. It starts with U+0002, which no node id uses (ids use U+0001 between the node and the prop), and scans leave it out.
 const ACK_KEY: &str = "\u{2}ack";
@@ -50,6 +57,23 @@ fn up8(n: usize) -> usize { (n + 7) & !7 }
 
 /// FNV-1a: the same in every process (a std hasher is seeded per process)
 fn hash(key: &[u8]) -> u64 { key.iter().fold(0xcbf29ce484222325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3)) }
+
+fn piece_key(gen: u64, k: usize) -> String { format!("\u{2}s{gen:x}\u{1}{k}") }
+/// The bytes of the header of a CBOR text string of `n` bytes.
+fn text_header(n: usize) -> usize { if n < 24 { 1 } else if n < 256 { 2 } else if n < 65536 { 3 } else { 5 } }
+/// The generation, the bytes of JSON text and the number of pieces of a spill head's value (one CBOR text string), or `None` for a value that is not one.
+fn parse_head(val: &[u8]) -> Option<(u64, u64, u64)> {
+    let J::String(s) = cbor::decode(val, 1).ok()? else { return None };
+    let mut it = s.strip_prefix(SPILL_MARK)?.split('\u{1}');
+    let gen = u64::from_str_radix(it.next()?, 16).ok()?;
+    let total = it.next()?.parse().ok()?;
+    let n = it.next()?.parse().ok()?;
+    if it.next().is_some() { return None; }
+    Some((gen, total, n))
+}
+fn nesting(v: &J) -> usize {
+    match v { J::Array(a) => 1 + a.iter().map(nesting).max().unwrap_or(0), J::Object(o) => 1 + o.values().map(nesting).max().unwrap_or(0), _ => 0 }
+}
 
 struct View { base: *mut u8, slots: u64, key_cap: usize, val_cap: usize, stride: usize }
 
@@ -89,15 +113,65 @@ impl View {
         Ok(Cell { rev, state: match state { LIVE => CellState::Live, GONE => CellState::Gone, _ => CellState::Refused }, value })
     }
 
-    fn get(&self, key: &str, spins: u64, depth: usize) -> Result<Option<Cell>, String> {
-        let h = hash(key.as_bytes());
+    /// The slot of `key` as it is now: (slot, state, revision, value bytes), or `None`.
+    fn lookup(&self, key: &[u8], spins: u64) -> Result<Option<(u64, u32, f64, Vec<u8>)>, String> {
+        let h = hash(key);
         for step in 0..self.slots {
             let i = (h.wrapping_add(step)) % self.slots;
             let (state, k, rev, val) = self.read_slot(i, spins)?;
             if state == EMPTY { return Ok(None); }
-            if k == key.as_bytes() { return self.cell(state, rev, &val, depth).map(Some); }
+            if k == key { return Ok(Some((i, state, rev, val))); }
         }
         Ok(None)
+    }
+
+    /// A slot as the cell it is: a spill head is the whole value of its pieces, anything else is decoded as it is.
+    fn resolve(&self, key: &[u8], state: u32, rev: f64, val: Vec<u8>, spins: u64, depth: usize) -> Result<Cell, String> {
+        if state == REFUSED { if let Some(h) = parse_head(&val) { return self.assemble(key, h, rev, val, spins, depth); } }
+        self.cell(state, rev, &val, depth)
+    }
+
+    /// The value of a spill head, from its pieces. The owner writes the pieces of a new value before its head and frees the pieces of the old one after it, so a reader that finds a piece gone
+    /// looks at the head again: it has a new generation (follow it) or it is the same (a corrupt table). Nothing is allocated by a number the region says: the text grows by the pieces that are there.
+    fn assemble(&self, key: &[u8], head: (u64, u64, u64), rev: f64, val: Vec<u8>, spins: u64, depth: usize) -> Result<Cell, String> {
+        let (mut head, mut rev, mut val) = (head, rev, val);
+        for _ in 0..spins.max(1) {
+            let (gen, total, n) = head;
+            if n == 0 || n > self.slots { return Err(format!("corrupt spilled value ({n} pieces in a table of {} slots)", self.slots)); }
+            let mut json: Vec<u8> = Vec::new();
+            let mut whole = true;
+            for k in 0..n as usize {
+                match self.lookup(piece_key(gen, k).as_bytes(), spins)? {
+                    Some((_, LIVE, _, v)) => match cbor::decode(&v, 1) { Ok(J::String(t)) => json.extend_from_slice(t.as_bytes()), _ => return Err("corrupt spilled value (a piece that is not text)".into()) },
+                    _ => { whole = false; break; }
+                }
+            }
+            let now = self.lookup(key, spins)?;
+            let same = matches!(&now, Some((_, st, _, v)) if *st == REFUSED && *v == val);
+            if whole && same {
+                if json.len() as u64 != total { return Err(format!("corrupt spilled value ({} bytes of pieces, {total} said)", json.len())); }
+                let value: J = serde_json::from_slice(&json).map_err(|e| format!("corrupt value: {e}"))?;
+                if nesting(&value) > depth { return Err("corrupt value: nested too deeply".into()); }
+                return Ok(Cell { rev, state: CellState::Live, value });
+            }
+            if same { return Err("corrupt spilled value (a piece is missing)".into()); }
+            // the cell changed under the read: take what it is now
+            match now {
+                None => return Err("a spilled value went while it was read".into()),
+                Some((_, st, r, v)) => {
+                    if st == REFUSED { if let Some(h) = parse_head(&v) { head = h; rev = r; val = v; continue; } }
+                    return self.cell(st, r, &v, depth);
+                }
+            }
+        }
+        Err("a spilled value kept changing while it was read".into())
+    }
+
+    fn get(&self, key: &str, spins: u64, depth: usize) -> Result<Option<Cell>, String> {
+        match self.lookup(key.as_bytes(), spins)? {
+            None => Ok(None),
+            Some((_, state, rev, val)) => self.resolve(key.as_bytes(), state, rev, val, spins, depth).map(Some),
+        }
     }
 
     fn gone_seq(&self) -> u64 { self.u64_at(H_GONE).load(Ordering::Acquire) }
@@ -107,15 +181,16 @@ impl View {
         for i in 0..self.slots {
             let (state, k, rev, val) = self.read_slot(i, spins)?;
             if state == EMPTY || !k.starts_with(prefix.as_bytes()) || k.first() == Some(&2u8) { continue; }
+            let cell = self.resolve(&k, state, rev, val, spins, depth)?;
             let key = String::from_utf8(k).map_err(|_| format!("corrupt slot {i} (a key that is not UTF-8)"))?;
-            out.push((key, self.cell(state, rev, &val, depth)?));
+            out.push((key, cell));
         }
         Ok(out)
     }
 }
 
 /// The owner's end: creates the table, writes it, removes the file when it goes.
-pub struct Cells { v: View, len: usize, name: String, _file: std::fs::File, reusable: u64, ack_rev: u64 }
+pub struct Cells { v: View, len: usize, name: String, _file: std::fs::File, reusable: u64, ack_rev: u64, spill_gen: u64 }
 
 unsafe impl Send for Cells {}
 
@@ -129,7 +204,7 @@ impl Cells {
         let len = HEADER + slots as usize * stride;
         let file = open_region(&name, Some(len), true)?;
         let base = match map(&file, len) { Ok(b) => b, Err(e) => { unlink_region(&name); return Err(e); } };
-        let c = Cells { v: View { base, slots, key_cap: key_cap as usize, val_cap: val_cap as usize, stride }, len, name, _file: file, reusable: 0, ack_rev: 0 };
+        let c = Cells { v: View { base, slots, key_cap: key_cap as usize, val_cap: val_cap as usize, stride }, len, name, _file: file, reusable: 0, ack_rev: 0, spill_gen: 0 };
         c.v.u32_at(H_LAYOUT).store(LAYOUT, Ordering::Relaxed);
         c.v.u64_at(H_SLOTS).store(slots, Ordering::Relaxed);
         c.v.u32_at(H_KEY_CAP).store(key_cap, Ordering::Relaxed);
@@ -177,10 +252,43 @@ impl Cells {
         match reusable { Some(i) => Ok((i, false)), None => Err(format!("the table is full ({} slots)", self.v.slots)) }
     }
 
+    /// The generation and number of pieces of the spill head in slot `i`, if it is one.
+    fn spill_of(&self, i: u64) -> Option<(u64, u64)> {
+        let (state, _, _, val) = self.v.read_slot(i, 1).ok()?;
+        if state != REFUSED { return None; }
+        parse_head(&val).map(|(g, _, n)| (g, n))
+    }
+
+    /// Give back the pieces of a spilled value that is not the cell's value any more (each becomes `Gone`, and is reused once the reader has seen it go like any other cell).
+    fn free_pieces(&mut self, gen: u64, n: u64) {
+        for k in 0..n as usize {
+            let key = piece_key(gen, k);
+            if let Ok((_, true)) = self.find(key.as_bytes()) { let _ = self.store(&key, 0.0, GONE, &[]); }
+        }
+    }
+
+    /// How many slots a new key can take now: the empty ones and the `Gone` ones the reader has acknowledged.
+    fn free_slots(&self) -> u64 {
+        (0..self.v.slots).filter(|&i| {
+            let state = self.v.u32_at(self.v.slot(i) + S_STATE).load(Ordering::Relaxed);
+            state == EMPTY || (state == GONE && self.stamp(i).is_some_and(|g| g <= self.reusable))
+        }).count() as u64
+    }
+
+    /// The largest text a slot holds as one CBOR text string.
+    fn piece_cap(&self) -> usize {
+        let cap = self.v.val_cap;
+        let mut n = cap.saturating_sub(1);
+        while n > 0 && text_header(n) + n > cap { n -= 1; }
+        n
+    }
+
     fn store(&mut self, key: &str, rev: f64, state: u32, val: &[u8]) -> Result<(), String> {
         if key.len() > self.v.key_cap { return Err(format!("the key is {} bytes, the capacity of a key is {}", key.len(), self.v.key_cap)); }
         if val.len() > self.v.val_cap { return Err(format!("the value is {} bytes encoded, the capacity of a value is {}", val.len(), self.v.val_cap)); }
         let (i, found) = self.find(key.as_bytes())?;
+        // the value this cell had may be a spilled one: its pieces are given back AFTER the cell says what it is now, so a reader in the middle of reading the old value finds the new head
+        let old = if found { self.spill_of(i) } else { None };
         if state == GONE {
             // a removal is numbered once: a cell that is already Gone keeps its number; the count in the header is raised after the slot is written, so a reader that
             // read the count and then scans sees every removal up to it
@@ -188,14 +296,58 @@ impl Cells {
             let (n, raise) = match existing { Some(n) => (n, false), None => (self.v.u64_at(H_GONE).load(Ordering::Relaxed) + 1, true) };
             self.write_slot(i, GONE, key.as_bytes(), rev, &cbor::encode(&J::from(n)));
             if raise { self.v.u64_at(H_GONE).store(n, Ordering::Release); }
-            return Ok(());
+        } else {
+            self.write_slot(i, state, key.as_bytes(), rev, val);
         }
-        self.write_slot(i, state, key.as_bytes(), rev, val);
+        if let Some((g, n)) = old { self.free_pieces(g, n); }
+        Ok(())
+    }
+
+    /// A value that does not fit a slot: its JSON text in pieces (new cells, a new generation), then the head, then the old pieces are given back. If the table cannot hold it all, the pieces
+    /// written so far are given back and the cell keeps what it had (the error is the table-full one).
+    fn store_spilled(&mut self, key: &str, rev: f64, value: &J, encoded: usize) -> Result<(), String> {
+        let too_big = || format!("the value is {encoded} bytes encoded, the capacity of a value is {}", self.v.val_cap);
+        if key.len() > self.v.key_cap { return Err(format!("the key is {} bytes, the capacity of a key is {}", key.len(), self.v.key_cap)); }
+        let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
+        let cap = self.piece_cap();
+        if cap < 4 { return Err(too_big()); }
+        let mut chunks: Vec<&str> = Vec::new();
+        let mut rest = json.as_str();
+        while !rest.is_empty() {
+            let mut at = rest.len().min(cap);
+            while !rest.is_char_boundary(at) { at -= 1; }
+            chunks.push(&rest[..at]);
+            rest = &rest[at..];
+        }
+        let gen = self.spill_gen + 1;
+        if piece_key(gen, chunks.len()).len() > self.v.key_cap { return Err(too_big()); }
+        // a value the table cannot hold takes no slot at all: the pieces and (for a new key) the head must find free slots, counted before the first is written
+        let need = chunks.len() as u64 + if matches!(self.find(key.as_bytes()), Ok((_, true))) { 0 } else { 1 };
+        if self.free_slots() < need { return Err(format!("the table is full ({} slots)", self.v.slots)); }
+        let mut written: Vec<String> = Vec::new();
+        let mut fail: Option<String> = None;
+        for (k, c) in chunks.iter().enumerate() {
+            let pk = piece_key(gen, k);
+            match self.store(&pk, 0.0, LIVE, &cbor::encode(&J::String((*c).to_string()))) { Ok(()) => written.push(pk), Err(e) => { fail = Some(e); break; } }
+        }
+        if fail.is_none() {
+            let head = format!("{SPILL_MARK}{gen:x}\u{1}{}\u{1}{}", json.len(), chunks.len());
+            if let Err(e) = self.store(key, rev, REFUSED, &cbor::encode(&J::String(head))) { fail = Some(e); }
+        }
+        if let Some(e) = fail {
+            for pk in &written { if let Ok((_, true)) = self.find(pk.as_bytes()) { let _ = self.store(pk, 0.0, GONE, &[]); } }
+            return Err(e);
+        }
+        self.spill_gen = gen;
         Ok(())
     }
 
     /// Set the cell of `key` to `value` at revision `rev`.
-    pub fn put(&mut self, key: &str, rev: f64, value: &J) -> Result<(), String> { self.store(key, rev, LIVE, &cbor::encode(value)) }
+    pub fn put(&mut self, key: &str, rev: f64, value: &J) -> Result<(), String> {
+        let encoded = cbor::encode(value);
+        if encoded.len() > self.v.val_cap { return self.store_spilled(key, rev, value, encoded.len()); }
+        self.store(key, rev, LIVE, &encoded)
+    }
 
     /// Mark the cell `Gone` or `Refused` (with the reason in `why`); `Live` is `put`.
     pub fn mark(&mut self, key: &str, rev: f64, state: CellState, why: &str) -> Result<(), String> {

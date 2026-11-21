@@ -69,7 +69,8 @@ fn a_scan_returns_the_cells_whose_key_starts_with_the_prefix() {
 fn what_does_not_fit_is_an_error_that_says_which_limit() {
     let (mut w, _r) = pair(4, 16, 32);
     assert!(w.put(&"k".repeat(17), 1.0, &json!(1)).unwrap_err().contains("key"));
-    assert!(w.put("k", 1.0, &json!("v".repeat(100))).unwrap_err().contains("value"));
+    // a value over a slot takes more slots (docs/shared-memory.md, section 4c): here it needs more than the table has, which is the table-full error, and takes none
+    assert!(w.put("k", 1.0, &json!("v".repeat(100))).unwrap_err().contains("full"));
     for i in 0..4 { w.put(&format!("key{i}"), 1.0, &json!(i)).unwrap(); }
     assert!(w.put("one more", 1.0, &json!(1)).unwrap_err().contains("full"), "the table has 4 slots");
     w.put("key2", 2.0, &json!("still fits")).unwrap();   // an existing key is not a new slot
