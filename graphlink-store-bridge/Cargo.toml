@@ -1,0 +1,22 @@
+[package]
+name = "graphlink-store-bridge"
+version.workspace = true
+edition.workspace = true
+description = "graphlink-store-bridge: a read-only window of a store made with the `graphlink` crate (Rylan12's in-memory typed store, NOT this project) onto a GraphLink seat, joined over shared memory"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+graphlink-core = { workspace = true }
+graphlink-shm = { workspace = true }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+libc = "0.2"
+# THE OTHER PROJECT'S CRATE (crates.io `graphlink`, github.com/Rylan12/graphlink; this workspace's crates are `graphlink-core`, `-shm`, ...). Pinned to the exact version: the store its `define_schema!` macro
+# generates is built on its `Collection` and, for the generational ids the adapter reads, on the hidden re-export `graphlink::__private` (slotmap): neither is API a newer release has to keep.
+graphlink = "=1.0.0"
