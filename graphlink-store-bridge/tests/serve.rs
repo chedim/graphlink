@@ -8,10 +8,16 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn example() -> std::path::PathBuf {
-    let mut p = std::env::current_exe().unwrap();   // target/<profile>/deps/serve-<hash>
-    p.pop(); p.pop(); p.push("examples"); p.push("library");
-    assert!(p.exists(), "the example is not built at {}", p.display());
-    p
+    // where the example binary is depends on the build layout (the test binary may be in `deps/` or in a separate build directory), so cargo is asked: `cargo build --example library` (a no-op when `cargo test` built it) prints the path
+    static PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let out = Command::new(cargo).args(["build", "-p", "graphlink-store-bridge", "--example", "library", "--message-format=json"]).current_dir(env!("CARGO_MANIFEST_DIR")).output().unwrap();
+        assert!(out.status.success(), "cargo build --example library failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|m| m["reason"] == "compiler-artifact" && m["target"]["name"] == "library" && m["target"]["kind"].to_string().contains("example"))
+            .filter_map(|m| m["executable"].as_str().map(std::path::PathBuf::from)).last().expect("cargo did not report the example's path")
+    }).clone()
 }
 fn serve(seat: &FakeSeat) -> Child {
     Command::new(example()).args(["serve", "--peer", &seat.name, "--ns", NS, "--slots", &NUMBERS.slots.to_string(), "--key-cap", &NUMBERS.key_cap.to_string(), "--val-cap", &NUMBERS.val_cap.to_string(),
