@@ -67,8 +67,6 @@ struct Active {
     held: Vec<u64>,
     /// the same calls as the reply says them: name and arguments, in the order they arrived
     calls: Vec<J>,
-    /// the tool_use blocks the stream has shown in this step
-    tool_uses: HashSet<String>,
     /// the round ended in tool calls and the child waits for their results
     awaiting: bool,
     closed: u8,
@@ -209,7 +207,7 @@ impl Handler {
             cfg.model = alias(&self.cfg.model, req.model.as_deref())?;
             let session = Session::spawn(&cfg, &req.system, &user, req.specs.clone())?;
             self.start_round(peer, &req.rid)?;
-            self.active.insert(req.mid.clone(), Active { session, req: eid.to_string(), round: Round::new(1, req.rid.clone()), held: Vec::new(), calls: Vec::new(), tool_uses: HashSet::new(), awaiting: false, closed: 0, tail: String::new() });
+            self.active.insert(req.mid.clone(), Active { session, req: eid.to_string(), round: Round::new(1, req.rid.clone()), held: Vec::new(), calls: Vec::new(), awaiting: false, closed: 0, tail: String::new() });
             return Ok(());
         }
         let Some(a) = self.active.get_mut(&req.mid) else {
@@ -220,7 +218,7 @@ impl Handler {
             return Err(format!("round {} ends with {} tool results but the run holds {} calls", req.n, req.results.len(), a.held.len()));
         }
         for (id, text) in a.held.iter().zip(req.results.iter()) { a.session.answer(*id, text, false)?; }
-        a.held.clear(); a.calls.clear(); a.tool_uses.clear(); a.awaiting = false;
+        a.held.clear(); a.calls.clear(); a.awaiting = false;
         a.req = eid.to_string(); a.round = Round::new(req.n, req.rid.clone());
         self.start_round(peer, &req.rid)
     }
@@ -314,6 +312,8 @@ impl Handler {
                 Ok(true)
             }
             Ev::Call { id, .. } if a.round.done && !a.awaiting => { let _ = a.session.answer(id, "this run has ended", true); Ok(false) }
+            // the CLI calls MCP tools one at a time (measured), so a call that comes while the round has already ended with the first one is not the usual: it is answered at once with what to do, never held
+            Ev::Call { id, .. } if a.round.done => { let _ = a.session.answer(id, "this run takes one tool call at a time: its first call of this step is being run; call this tool again after that result", true); Ok(false) }
             Ev::Call { id, name, args } => {
                 a.held.push(id);
                 a.calls.push(json!({"name": name, "arguments": if args.is_null() { json!({}) } else { args }}));
@@ -328,7 +328,6 @@ impl Handler {
                         for b in msg["content"].as_array().into_iter().flatten() {
                             match b["type"].as_str() {
                                 Some("text") => { let t = b["text"].as_str().unwrap_or(""); if !t.is_empty() { if !a.round.text.is_empty() { a.round.text.push_str("\n\n"); } a.round.text.push_str(t); } }
-                                Some("tool_use") => { a.tool_uses.insert(b["id"].as_str().unwrap_or("").to_string()); }
                                 _ => {}
                             }
                         }
@@ -373,10 +372,11 @@ impl Handler {
         peer.publish(&format!("{}::Reply:{rid}", self.cfg.ns), "chunks", &json!(n))
     }
 
-    /// When every tool call the stream showed in this step is held by the shim, the round ends with them.
+    /// The round ends with the FIRST tool call the shim holds: the CLI calls MCP tools one at a time (with two `tool_use` blocks in one message the second call comes only after the first
+    /// was answered), so waiting for every announced call waits for ever. The seat runs the call and its next round carries the result; the second call is that round's.
     fn maybe_calls(&mut self, peer: &mut Peer, mid: &str, _cap: usize) -> Result<bool, String> {
         let a = self.active.get_mut(mid).expect("active");
-        if a.round.done || a.held.is_empty() || a.held.len() < a.tool_uses.len() { return Ok(false); }
+        if a.round.done || a.held.is_empty() { return Ok(false); }
         a.round.done = true; a.awaiting = true;
         let calls = std::mem::take(&mut a.calls);
         let (rid, n, usage) = (a.round.rid.clone(), a.round.published.len(), usage_of(&a.round.usage));
