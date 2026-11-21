@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "graphlink-anthropic"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "graphlink-core",
  "graphlink-shm",
@@ -185,14 +185,14 @@ dependencies = [
 
 [[package]]
 name = "graphlink-auth"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "graphlink-bridge"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "graphlink-auth",
  "graphlink-core",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "graphlink-claude"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "graphlink-core",
  "graphlink-shm",
@@ -213,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "graphlink-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "graphlink-auth",
  "graphlink-core",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "graphlink-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde_json",
 ]
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "graphlink-net"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "graphlink-core",
  "rcgen",
@@ -252,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "graphlink-openai"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "graphlink-core",
  "graphlink-shm",
@@ -262,7 +262,7 @@ dependencies = [
 
 [[package]]
 name = "graphlink-shm"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "graphlink-core",
  "serde_json",
@@ -270,7 +270,7 @@ dependencies = [
 
 [[package]]
 name = "graphlink-store-bridge"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "graphlink",
  "graphlink-core",
