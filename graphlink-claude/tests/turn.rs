@@ -73,6 +73,24 @@ fn a_tool_call_ends_the_round_and_the_next_request_carries_the_result_into_the_s
 }
 
 #[test]
+fn a_tool_result_over_the_cap_reaches_the_child_as_its_head_and_tail() {
+    // the CLI refuses a result over its own limit and the model then gets nothing: the child is handed the first and last 8192 characters and a line that says what was left out (src/cap.rs)
+    let mut rig = Rig::new("tcap");
+    rig.seat.round1("c/tcap", "toolsize tcap", &["echo"]);
+    rig.until_state("c/tcap-1", "done");
+    let big = format!("{}{}{}", "A".repeat(8192), "m".repeat(30_000), "Z".repeat(8192));
+    rig.seat.assistant_calls("c/tcap", 2, json!([{"type": "function", "function": {"name": "echo", "arguments": {"text": "ping"}}}]));
+    rig.seat.msg("c/tcap", 3, "tool", &big);
+    rig.seat.request("c/tcap", 2, 4, 1);
+    rig.until_state("c/tcap-2", "done");
+    let r = rig.seat.reader();
+    let got = text(&r, "c/tcap-2");
+    let len: usize = got.strip_prefix("len=").and_then(|x| x.split(' ').next()).and_then(|x| x.parse().ok()).expect("the length the child saw");
+    assert!(len < 16_700 && len > 16_384, "the child saw the two ends and a line, not the whole {}: {got}", big.len());
+    assert!(got.contains("head=AAA") && got.contains("tail=ZZZ") && got.contains("cut=True"), "{got}");
+}
+
+#[test]
 fn several_tool_uses_of_one_step_are_each_their_own_round_because_the_cli_calls_one_tool_at_a_time() {
     // measured on the real CLI: with two tool_use blocks in one message the second call comes only after the first was answered. A peer that waited for both before ending the round
     // waited for ever (turns that took 30 minutes on a seat): the round ends on the first held call, the seat runs it, and the second call is the next round's
