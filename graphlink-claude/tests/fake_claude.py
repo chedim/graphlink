@@ -62,6 +62,15 @@ elif mode == "tool":
     emit({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu1", "content": r}]}})
     assistant([{"type": "text", "text": "got: " + r + " [tools: " + ",".join(tools) + "]"}], "m2", usage=(11, 13))
     result("got: " + r, usage=(99, 99))
+elif mode == "toolsize":
+    # the same call as "tool", but the reply says only what the child was handed: its length, both ends and whether a line says something was left out (the reply is chunked, so the result is not echoed)
+    s, tools = start()
+    assistant([{"type": "text", "text": "checking"}, {"type": "tool_use", "id": "tu1", "name": "mcp__seat__echo", "input": {"text": "ping"}}], "m1")
+    s.send("tools/call", {"name": "echo", "arguments": {"text": "ping"}})
+    r = s.recv()["result"]["content"][0]["text"]
+    summary = "len=%d head=%s tail=%s cut=%s" % (len(r), r[:3], r[-3:], "left out" in r)
+    assistant([{"type": "text", "text": summary}], "m2", usage=(1, 1))
+    result(summary, usage=(1, 1))
 elif mode == "two":
     s, tools = start()
     assistant([{"type": "tool_use", "id": "tu1", "name": "mcp__seat__echo", "input": {"text": "a"}}, {"type": "tool_use", "id": "tu2", "name": "mcp__seat__other", "input": {"n": 2}}], "m1")

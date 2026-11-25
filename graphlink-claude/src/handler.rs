@@ -88,6 +88,9 @@ pub struct Handler {
     announced: bool,
 }
 
+/// the characters kept at each end of a tool result handed to the CLI: the number the seat's door used (`mc_w_cap`, 8192, operator 2026-11-13), moved here
+const RESULT_CAP: usize = 8192;
+
 struct Req { rid: String, mid: String, n: u32, model: Option<String>, system: String, user: Option<String>, specs: Vec<J>, results: Vec<String> }
 enum Read { Wait, Aborted, Failed(String), Ready(Req) }
 
@@ -217,7 +220,7 @@ impl Handler {
         if req.results.len() != a.held.len() {
             return Err(format!("round {} ends with {} tool results but the run holds {} calls", req.n, req.results.len(), a.held.len()));
         }
-        for (id, text) in a.held.iter().zip(req.results.iter()) { a.session.answer(*id, text, false)?; }
+        for (id, text) in a.held.iter().zip(req.results.iter()) { a.session.answer(*id, &crate::cap::cap_result(text, RESULT_CAP), false)?; }
         a.held.clear(); a.calls.clear(); a.awaiting = false;
         a.req = eid.to_string(); a.round = Round::new(req.n, req.rid.clone());
         self.start_round(peer, &req.rid)
